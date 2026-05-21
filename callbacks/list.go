@@ -1,0 +1,217 @@
+package callbacks
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/duke-git/lancet/v2/slice"
+	"github.com/duke-git/lancet/v2/stream"
+	"github.com/weibaohui/kom/kom"
+	"github.com/weibaohui/kom/utils"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
+)
+
+func ConvertUnstructuredItems(src *unstructured.UnstructuredList) []*unstructured.Unstructured {
+	var dstItems []*unstructured.Unstructured
+	for i := range src.Items {
+		// 注意：使用 &src.Items[i] 是安全的，因为我们遍历的是 index，而不是 range 中的值副本
+		dstItems = append(dstItems, &src.Items[i])
+	}
+	return dstItems
+}
+func List(k *kom.Kubectl) error {
+
+	stmt := k.Statement
+	gvr := stmt.GVR
+	namespaced := stmt.Namespaced
+	ns := stmt.Namespace
+	ctx := stmt.Context
+	conditions := stmt.Filter.Conditions
+	namespaceList := stmt.NamespaceList
+
+	opts := stmt.ListOptions
+	listOptions := metav1.ListOptions{}
+	listOptionsMD5 := "" // cache key值
+	if len(opts) > 0 {
+		listOptions = opts[0]
+
+		// 将listOptions序列化为JSON字符串，并取MD5摘要，加入cacheKey
+		listOptionsStr := utils.ToJSON(listOptions)
+		listOptionsMD5 = utils.MD5Hash(listOptionsStr)
+	}
+
+	// 使用反射获取 dest 的值
+	destValue := reflect.ValueOf(stmt.Dest)
+
+	// 确保 dest 是一个指向切片的指针
+	if destValue.Kind() != reflect.Ptr || destValue.Elem().Kind() != reflect.Slice {
+		// 处理错误：dest 不是指向切片的指针
+		return fmt.Errorf("请传入数组类型")
+	}
+	// 获取切片的元素类型
+	elemType := destValue.Elem().Type().Elem()
+
+	cacheKey := fmt.Sprintf("%s/%s/%s/%s/%s", ns, gvr.Group, gvr.Resource, gvr.Version, listOptionsMD5)
+	list, err := utils.GetOrSetCache(stmt.ClusterCache(), cacheKey, stmt.CacheTTL, func() (list *unstructured.UnstructuredList, err error) {
+		// TODO 获取列表改为使用Option,解决大数据量获取问题。
+		if namespaced {
+			if stmt.AllNamespace || len(namespaceList) > 1 {
+				// 全部命名空间 或者  传入多个命名空间
+				// client-go 不支持跨命名空间查询，就全部查出来，后面再过滤
+				ns = metav1.NamespaceAll
+				list, err = stmt.Kubectl.DynamicClient().Resource(gvr).Namespace(ns).List(ctx, listOptions)
+			} else {
+				// 不是全部，也没有传多个命名空间
+				if ns == "" {
+					ns = metav1.NamespaceDefault
+				}
+				list, err = stmt.Kubectl.DynamicClient().Resource(gvr).Namespace(ns).List(ctx, listOptions)
+			}
+		} else {
+			// 集群级查询，不需要namespace
+			list, err = stmt.Kubectl.DynamicClient().Resource(gvr).List(ctx, listOptions)
+		}
+		return
+	})
+	if err != nil {
+		return err
+	}
+	if list == nil {
+		// 为空直接返回
+		return fmt.Errorf("list is nil")
+	}
+	if list.Items == nil {
+		// 为空直接返回
+		return fmt.Errorf("list Items is nil")
+	}
+
+	items := ConvertUnstructuredItems(list)
+
+	// 对结果进行过滤，执行where 条件
+	result := executeFilter(items, conditions)
+	if stmt.TotalCount != nil {
+		*stmt.TotalCount = int64(len(result))
+	}
+
+	if stmt.Filter.Order != "" {
+		// 对结果执行OrderBy
+		klog.V(6).Infof("order by = %s", stmt.Filter.Order)
+		executeOrderBy(result, stmt.Filter.Order)
+	} else {
+		// 默认按创建时间倒序
+		utils.SortByCreationTime(result)
+	}
+
+	// 先清空之前的值
+	destValue.Elem().Set(reflect.MakeSlice(destValue.Elem().Type(), 0, 0))
+	streamTmp := stream.FromSlice(result)
+	// 查看是否有filter ，先使用filter 形成一个最终的list.Items
+	if stmt.Filter.Offset > 0 {
+		streamTmp = streamTmp.Skip(stmt.Filter.Offset)
+	}
+	if stmt.Filter.Limit > 0 {
+		streamTmp = streamTmp.Limit(stmt.Filter.Limit)
+	}
+
+	for _, item := range streamTmp.ToSlice() {
+
+		obj := item.DeepCopy()
+		if stmt.RemoveManagedFields {
+			utils.RemoveManagedFields(obj)
+		}
+		// 创建新的指向元素类型的指针
+		newElemPtr := reflect.New(elemType)
+		// unstructured 转换为原始目标类型
+		err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, newElemPtr.Interface())
+		// 将指针的值添加到切片中
+		destValue.Elem().Set(reflect.Append(destValue.Elem(), newElemPtr.Elem()))
+
+	}
+	stmt.RowsAffected = int64(len(list.Items))
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func executeOrderBy(result []*unstructured.Unstructured, order string) {
+	// order by `metadata.name` asc, `metadata.host` asc
+	// todo 目前只实现了单一字段的排序，还没有搞定多个字段的排序
+	order = strings.TrimPrefix(strings.TrimSpace(order), "order by")
+	order = strings.TrimSpace(order)
+	orders := strings.Split(order, ",")
+	for _, ord := range orders {
+		var field string
+		var desc bool
+		// 判断排序方向
+		if strings.Contains(ord, "desc") {
+			desc = true
+			field = strings.ReplaceAll(ord, "desc", "")
+		} else {
+			field = strings.ReplaceAll(ord, "asc", "")
+		}
+		field = strings.TrimSpace(field)
+		field = strings.TrimSpace(utils.TrimQuotes(field))
+		klog.V(6).Infof("Sorting by field: %s, Desc: %v", field, desc)
+
+		slice.SortBy(result, func(a, b *unstructured.Unstructured) bool {
+			// 获取字段值
+			aFieldValues, found, err := getNestedFieldAsString(a.Object, field)
+			if err != nil || !found {
+				return false
+			}
+			bFieldValues, found, err := getNestedFieldAsString(b.Object, field)
+			if err != nil || !found {
+				return false
+			}
+
+			// order by 必须把数组变为单一的值
+			if len(aFieldValues) > 1 || len(bFieldValues) > 1 {
+				return false
+			}
+			if len(aFieldValues) == 0 || len(bFieldValues) == 0 {
+				return false
+			}
+			aFieldValue := aFieldValues[0]
+			bFieldValue := bFieldValues[0]
+
+			t, va := utils.DetectType(aFieldValue)
+			_, vb := utils.DetectType(bFieldValue)
+
+			switch t {
+			case utils.TypeString:
+				if desc {
+					return va.(string) > vb.(string)
+				}
+				return va.(string) < vb.(string)
+			case utils.TypeNumber:
+				if desc {
+					return va.(float64) > vb.(float64)
+				}
+				return va.(float64) < vb.(float64)
+			case utils.TypeTime:
+				tva, err := utils.ParseTime(fmt.Sprintf("%s", va))
+				if err != nil {
+					return false
+				}
+				tvb, err := utils.ParseTime(fmt.Sprintf("%s", vb))
+				if err != nil {
+					return false
+				}
+				if desc {
+					return tva.After(tvb)
+				}
+				return tva.Before(tvb)
+			default:
+				return false
+			}
+		})
+
+	}
+
+}

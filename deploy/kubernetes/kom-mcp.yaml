@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kom-mcp
+  namespace: devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kom-mcp
+  template:
+    metadata:
+      labels:
+        app: kom-mcp
+    spec:
+      containers:
+        - name: kom-mcp
+          image: dev-apaas-harbor-app.mis.bcs/ai/kom:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KOM_MCP_NAME
+              value: kom mcp server
+            - name: KOM_KUBECONFIG_DIR
+              value: /etc/kom/kubeconfigs
+            - name: KOM_MCP_PORT
+              value: "9096"
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: http
+              containerPort: 9096
+          volumeMounts:
+            - name: kubeconfigs
+              mountPath: /etc/kom/kubeconfigs
+              readOnly: true
+      volumes:
+        - name: kubeconfigs
+          secret:
+            secretName: kom-kubeconfigs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kom-mcp
+  namespace: devops
+spec:
+  selector:
+    app: kom-mcp
+  ports:
+    - name: http
+      port: 9096
+      targetPort: http

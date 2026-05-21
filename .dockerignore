@@ -1,0 +1,7 @@
+.git
+.air.toml
+bin/
+dist/
+tmp/
+*.log
+coverage.out
