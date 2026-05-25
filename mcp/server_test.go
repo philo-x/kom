@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -12,6 +13,7 @@ import (
 	"github.com/weibaohui/kom/kom"
 	"github.com/weibaohui/kom/mcp/tools/dynamic"
 	"github.com/weibaohui/kom/mcp/tools/event"
+	"github.com/weibaohui/kom/mcp/tools/kubectl"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/homedir"
@@ -61,6 +63,7 @@ func TestMcpToolsRegistration(t *testing.T) {
 		"get_k8s_node_dmesg_oom",
 		"diagnose_k8s_csi_driver",
 		"get_k8s_resource_metrics_history",
+		"kubectl",
 	}
 
 	for _, name := range expectedTools {
@@ -211,4 +214,92 @@ func TestDescribeNamespaceWithoutEvents(t *testing.T) {
 	}
 
 	t.Logf("Describe Namespace result: %s", textContent.Text)
+}
+
+func TestKubectlTool(t *testing.T) {
+	initTestCluster(t)
+
+	req := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "kubectl",
+			Arguments: map[string]interface{}{
+				"cluster": "default",
+				"cmd":     "version --client",
+			},
+		},
+	}
+
+	res, err := kubectl.KubectlHandler(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("KubectlHandler failed: %v", err)
+	}
+
+	if len(res.Content) == 0 {
+		t.Fatal("Response content is empty")
+	}
+
+	textContent, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("Expected TextContent, got %T", res.Content[0])
+	}
+
+	t.Logf("Kubectl tool execution result:\n%s", textContent.Text)
+}
+
+func TestKubectlToolReadonlyConstraint(t *testing.T) {
+	initTestCluster(t)
+
+	// 1. 验证拒绝写/删操作 (delete)
+	reqDelete := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "kubectl",
+			Arguments: map[string]interface{}{
+				"cluster": "default",
+				"cmd":     "delete pod test-pod",
+			},
+		},
+	}
+	_, err := kubectl.KubectlHandler(context.TODO(), reqDelete)
+	if err == nil {
+		t.Fatal("Expected error for delete command, but got none")
+	}
+	if !strings.Contains(err.Error(), "only read-only commands") {
+		t.Errorf("Unexpected error message for delete command: %v", err)
+	}
+
+	// 2. 验证拒绝非只读 rollout 命令 (rollout restart)
+	reqRolloutRestart := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "kubectl",
+			Arguments: map[string]interface{}{
+				"cluster": "default",
+				"cmd":     "rollout restart deployment/nginx",
+			},
+		},
+	}
+	_, err = kubectl.KubectlHandler(context.TODO(), reqRolloutRestart)
+	if err == nil {
+		t.Fatal("Expected error for rollout restart command, but got none")
+	}
+	if !strings.Contains(err.Error(), "only read-only rollout commands") {
+		t.Errorf("Unexpected error message for rollout restart: %v", err)
+	}
+
+	// 3. 验证允许只读 rollout 命令 (rollout status)
+	reqRolloutStatus := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "kubectl",
+			Arguments: map[string]interface{}{
+				"cluster": "default",
+				"cmd":     "rollout status deployment/nginx",
+			},
+		},
+	}
+	// rollout status on a non-existent deployment will return a kubectl execution error or wait.
+	// But it should NOT be rejected by the allowlist check.
+	// So we only assert that the check passed (e.g. if it fails, it shouldn't be because of the subcommand checker).
+	_, err = kubectl.KubectlHandler(context.TODO(), reqRolloutStatus)
+	if err != nil && strings.Contains(err.Error(), "only read-only") {
+		t.Errorf("rollout status was incorrectly rejected by allowlist: %v", err)
+	}
 }

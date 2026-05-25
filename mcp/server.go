@@ -16,6 +16,7 @@ import (
 	"github.com/weibaohui/kom/mcp/tools/dynamic"
 	"github.com/weibaohui/kom/mcp/tools/event"
 	"github.com/weibaohui/kom/mcp/tools/ingressclass"
+	"github.com/weibaohui/kom/mcp/tools/kubectl"
 	"github.com/weibaohui/kom/mcp/tools/node"
 	"github.com/weibaohui/kom/mcp/tools/ns"
 	"github.com/weibaohui/kom/mcp/tools/pod"
@@ -316,6 +317,7 @@ func GetMCPServerWithOption(cfg *ServerConfig) *server.MCPServer {
 	yaml.RegisterTools(s)
 	ns.RegisterTools(s)
 	daemonset.RegisterTools(s)
+	kubectl.RegisterTools(s)
 	return s
 
 }
