@@ -48,4 +48,12 @@ func RegisterTools(s *server.MCPServer) {
 		TopNode(),
 		TopNodeHandler,
 	)
+	s.AddTool(
+		GetNodeSystemLogsTool(),
+		GetNodeSystemLogsHandler,
+	)
+	s.AddTool(
+		GetNodeDmesgOOMTool(),
+		GetNodeDmesgOOMHandler,
+	)
 }

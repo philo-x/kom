@@ -18,4 +18,8 @@ func RegisterTools(s *server.MCPServer) {
 		GetStorageClassPVCountTool(),
 		GetStorageClassPVCountHandler,
 	)
+	s.AddTool(
+		DiagnoseCSIDriverTool(),
+		DiagnoseCSIDriverHandler,
+	)
 }

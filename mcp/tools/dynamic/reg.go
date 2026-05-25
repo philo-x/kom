@@ -28,5 +28,8 @@ func RegisterTools(s *server.MCPServer) {
 	s.AddTool(
 		PatchDynamicResource(),
 		PatchDynamicResourceHandler)
-	 
+	s.AddTool(
+		GetResourceMetricsHistoryTool(),
+		GetResourceMetricsHistoryHandler,
+	)
 }

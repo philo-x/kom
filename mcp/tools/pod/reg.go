@@ -72,14 +72,20 @@ func RegisterTools(s *server.MCPServer) {
 		DescribePodHandler)
 
 	s.AddTool(
-		ListPodEventResource(),
-		ListPodEventResourceHandler)
-
-	s.AddTool(
 		TopPod(),
 		TopPodHandler)
 
 	s.AddTool(
 		DeletePodTool(),
 		DeletePodHandler)
+
+	s.AddTool(
+		DiagnosePodNetworkTool(),
+		DiagnosePodNetworkHandler,
+	)
+
+	s.AddTool(
+		TestPodDNSResolveTool(),
+		TestPodDNSResolveHandler,
+	)
 }

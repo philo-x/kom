@@ -21,6 +21,7 @@ func GetDynamicResourceDescribe() mcp.Tool {
 		mcp.WithString("group", mcp.Description("资源的API组 / API group of the resource")),
 		mcp.WithString("version", mcp.Description("资源的API版本 / API version of the resource")),
 		mcp.WithString("kind", mcp.Description("资源的类型 / Kind of the resource")),
+		mcp.WithBoolean("showEvents", mcp.Description("是否在详情中展示事件信息（默认不展示以节省Token）/ Whether to show event information in the details (default false to save tokens)")),
 	)
 }
 
@@ -30,6 +31,9 @@ func GetDynamicResourceDescribeHandler(ctx context.Context, request mcp.CallTool
 	if err != nil {
 		return nil, err
 	}
+
+	showEvents := request.GetBool("showEvents", false)
+	ctx = context.WithValue(ctx, "showEvents", showEvents)
 
 	var describeResult []byte
 	err = kom.Cluster(meta.Cluster).WithContext(ctx).CRD(meta.Group, meta.Version, meta.Kind).Namespace(meta.Namespace).Name(meta.Name).RemoveManagedFields().Describe(&describeResult).Error

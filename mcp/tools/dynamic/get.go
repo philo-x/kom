@@ -3,11 +3,11 @@ package dynamic
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/weibaohui/kom/kom"
 	"github.com/weibaohui/kom/mcp/tools"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func GetDynamicResource() mcp.Tool {
@@ -32,7 +32,7 @@ func GetDynamicResourceHandler(ctx context.Context, request mcp.CallToolRequest)
 		return nil, err
 	}
 
-	var item *unstructured.Unstructured
+	var item map[string]interface{}
 	kubectl := kom.Cluster(meta.Cluster).WithContext(ctx).CRD(meta.Group, meta.Version, meta.Kind).Namespace(meta.Namespace)
 	if meta.Namespace == "" {
 		kubectl = kubectl.AllNamespace()
@@ -41,6 +41,63 @@ func GetDynamicResourceHandler(ctx context.Context, request mcp.CallToolRequest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get item [%s/%s] type of  [%s%s%s]: %v", meta.Namespace, meta.Name, meta.Group, meta.Version, meta.Kind, err)
 	}
-	return tools.TextResult(item, meta)
 
+	if item != nil {
+		slimResourceMap(item)
+		kind, _ := item["kind"].(string)
+		apiVersion, _ := item["apiVersion"].(string)
+		if strings.EqualFold(kind, "Secret") && (apiVersion == "v1" || strings.Contains(apiVersion, "/v1")) {
+			if data, ok := item["data"].(map[string]interface{}); ok {
+				maskedData := make(map[string]interface{})
+				for k := range data {
+					maskedData[k] = "*** [Base64 Obfuscated]"
+				}
+				item["data"] = maskedData
+			}
+			if stringData, ok := item["stringData"].(map[string]interface{}); ok {
+				maskedStringData := make(map[string]interface{})
+				for k := range stringData {
+					maskedStringData[k] = "*** [Redacted]"
+				}
+				item["stringData"] = maskedStringData
+			}
+		}
+	}
+
+	return tools.TextResult(item, meta)
+}
+
+func slimResourceMap(item map[string]interface{}) {
+	if item == nil {
+		return
+	}
+
+	// 1. Clean metadata
+	if metadata, ok := item["metadata"].(map[string]interface{}); ok {
+		delete(metadata, "managedFields")
+		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
+			delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+			// Truncate other extremely large annotations (e.g. > 1000 characters)
+			for k, v := range annotations {
+				if strVal, ok := v.(string); ok && len(strVal) > 1000 {
+					annotations[k] = fmt.Sprintf("... [Truncated, length %d]", len(strVal))
+				}
+			}
+		}
+	}
+
+	// 2. Clean status to avoid noise (e.g. massive histories or conditions list)
+	if status, ok := item["status"].(map[string]interface{}); ok {
+		for k, v := range status {
+			if sliceVal, ok := v.([]interface{}); ok {
+				if len(sliceVal) > 5 {
+					// Truncate to keep only the last 5 elements (most recent)
+					status[k] = sliceVal[len(sliceVal)-5:]
+				}
+			}
+			if strVal, ok := v.(string); ok && len(strVal) > 1000 {
+				status[k] = fmt.Sprintf("... [Truncated, length %d]", len(strVal))
+			}
+		}
+	}
 }

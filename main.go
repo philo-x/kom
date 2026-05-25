@@ -75,7 +75,7 @@ func registerDefaultCluster() error {
 		return fmt.Errorf("kubeconfig %s is not accessible: %w", defaultKubeConfig, err)
 	}
 
-	if _, err := kom.Clusters().RegisterByPathWithID(defaultKubeConfig, "default"); err != nil {
+	if _, err := kom.Clusters().RegisterByPathWithID(defaultKubeConfig, "dev"); err != nil {
 		return err
 	}
 	kom.Clusters().Show()

@@ -44,6 +44,13 @@ func Describe(k *kom.Kubectl) error {
 		ns = metav1.NamespaceNone
 	}
 
+	showEvents := true
+	if ctxVal := stmt.Context.Value("showEvents"); ctxVal != nil {
+		if b, ok := ctxVal.(bool); ok {
+			showEvents = b
+		}
+	}
+
 	var output string
 	var err error
 	// 执行describe
@@ -55,7 +62,7 @@ func Describe(k *kom.Kubectl) error {
 	// 先从内置的describerMap中查找
 	if d, ok := m[gk]; ok {
 		output, err = d.Describe(ns, name, describe.DescriberSettings{
-			ShowEvents: true,
+			ShowEvents: showEvents,
 		})
 		if err != nil {
 			return fmt.Errorf("DescriberMap describe %s/%s error: %v", gvk.String(), name, err)
@@ -67,7 +74,7 @@ func Describe(k *kom.Kubectl) error {
 		}
 		if gd, b := describe.GenericDescriberFor(mapping, k.RestConfig()); b {
 			output, err = gd.Describe(ns, name, describe.DescriberSettings{
-				ShowEvents: true,
+				ShowEvents: showEvents,
 			})
 			if err != nil {
 				return fmt.Errorf("GenericDescriber describe %s/%s error: %v", gvk.String(), name, err)
