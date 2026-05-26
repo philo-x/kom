@@ -2,6 +2,7 @@ package kubectl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,11 +20,19 @@ import (
 func KubectlTool() mcp.Tool {
 	return mcp.NewTool(
 		"kubectl",
-		mcp.WithDescription("执行任意 kubectl 命令作为兜底工具 / Run any kubectl command as a fallback tool"),
+		mcp.WithDescription(
+			"Read-only kubectl fallback tool. No shell pipes/redirects/external commands (grep,jq,awk).\n"+
+				"Output format priority (lowest to highest token cost):\n"+
+				"  1. -o jsonpath=<expr>  — extract only needed fields; use {\"\\t\"}/{\"\\n\"} for whitespace\n"+
+				"     e.g. {.items[*].metadata.name} | {range .items[*]}{.metadata.name} {.status.readyReplicas}/{.status.replicas} {end}\n"+
+				"  2. -l <label> / --field-selector — server-side filtering\n"+
+				"  3. -o json — full object (managedFields & last-applied-configuration auto-stripped)\n"+
+				"  4. default table — overview only",
+		),
 		mcp.WithTitleAnnotation("Execute Kubectl Command"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("cluster", mcp.Description("运行命令的集群（使用空字符串表示默认集群）/ Cluster where the command is executed (use empty string for default cluster)")),
-		mcp.WithString("cmd", mcp.Description("要执行的 kubectl 命令字符串，例如 'get pods -n default' / The kubectl command string to execute, e.g., 'get pods -n default'")),
+		mcp.WithString("cmd", mcp.Description("要执行的 kubectl 命令字符串，例如 'get pods -n default'。不支持管道和外部命令。/ The kubectl command string to execute, e.g., 'get pods -n default'. Pipes and external commands are not supported.")),
 		mcp.WithArray("args",
 			mcp.Description("参数列表（可选，如果指定了 cmd，则优先使用 cmd 并解析） / The arguments list (optional)"),
 			mcp.Items(map[string]interface{}{"type": "string"}),
@@ -79,6 +88,22 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		return nil, fmt.Errorf("command is empty after removing 'kubectl'")
 	}
 
+	// 检测 Shell 运算符（管道、重定向等），直接执行时不经过 Shell，这些运算符无法被解释
+	if op, found := detectShellOperator(args); found {
+		return nil, fmt.Errorf(
+			"不支持 Shell 运算符 %q。\n"+
+				"kubectl MCP 工具通过 exec.Command 直接执行，不经过 Shell 解释器，管道（|）、重定向（>）及外部命令（grep、jq、awk）均无法使用。\n\n"+
+				"建议替代方案：\n"+
+				"  • 使用 -o jsonpath='...' 提取特定字段\n"+
+				"  • 使用 --field-selector 或 -l 按标签/字段过滤\n"+
+				"  • 使用 -o json 获取原始数据，由调用方在 Agent 逻辑中解析\n"+
+				"/ Shell operator %q is not supported. kubectl MCP tool runs via exec.Command directly without a shell interpreter. "+
+				"Pipes (|), redirects (>), and external commands (grep, jq, awk) cannot be used. "+
+				"Use kubectl native options such as -o jsonpath, --field-selector, or -l for filtering.",
+			op, op,
+		)
+	}
+
 	// 检查仅允许只读操作的限制
 	subcmd := strings.ToLower(args[0])
 	if subcmd == "rollout" {
@@ -116,7 +141,74 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		return nil, fmt.Errorf("kubectl execution failed: %v, output: %s", err, string(output))
 	}
 
-	return tools.TextResult(string(output), meta)
+	// 方案A：当使用 -o json 输出时，自动剥离高噪音字段以减少 LLM token 消耗
+	result := string(output)
+	if isJSONOutput(args) {
+		result = stripJSONNoise(result)
+	}
+
+	return tools.TextResult(result, meta)
+}
+
+// isJSONOutput 检查参数列表中是否包含 -o json 或 --output json 或 --output=json
+func isJSONOutput(args []string) bool {
+	for i, arg := range args {
+		switch {
+		case arg == "-o" || arg == "--output":
+			if i+1 < len(args) && args[i+1] == "json" {
+				return true
+			}
+		case arg == "-o=json" || arg == "--output=json":
+			return true
+		}
+	}
+	return false
+}
+
+// stripJSONNoise 从 kubectl -o json 的输出中剥离对 LLM 无价值的高噪音字段：
+//   - metadata.managedFields：Kubernetes 内部字段追踪信息
+//   - metadata.annotations[kubectl.kubernetes.io/last-applied-configuration]：apply 时记录的全量配置快照
+func stripJSONNoise(raw string) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		// 解析失败则原样返回，不影响正常使用
+		return raw
+	}
+
+	stripObject(obj)
+
+	cleaned, err := json.MarshalIndent(obj, "", "    ")
+	if err != nil {
+		return raw
+	}
+	return string(cleaned)
+}
+
+// stripObject 递归处理 JSON 对象，清除噪音字段
+func stripObject(obj map[string]interface{}) {
+	// 处理 metadata 字段
+	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
+		// 删除 managedFields
+		delete(meta, "managedFields")
+
+		// 删除 annotations 中的 last-applied-configuration
+		if annotations, ok := meta["annotations"].(map[string]interface{}); ok {
+			delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+			// 如果 annotations 已空，也一并删除
+			if len(annotations) == 0 {
+				delete(meta, "annotations")
+			}
+		}
+	}
+
+	// 递归处理 items 列表（适用于 List 类型资源）
+	if items, ok := obj["items"].([]interface{}); ok {
+		for _, item := range items {
+			if itemObj, ok := item.(map[string]interface{}); ok {
+				stripObject(itemObj)
+			}
+		}
+	}
 }
 
 // writeKubeconfig 将 rest.Config 转换为临时的 kubeconfig 文件
@@ -189,41 +281,86 @@ func writeKubeconfig(restConfig *rest.Config) (string, func(), error) {
 	return tempFilePath, cleanup, nil
 }
 
-// parseCommandLine 解析命令行字符串为参数列表，支持单/双引号及转义
+// shellOperators 是需要检测的 Shell 运算符集合
+var shellOperators = map[string]bool{
+	"|": true, ">": true, "<": true, ">>": true, "<<": true,
+	"&&": true, "||": true, ";": true, "&": true,
+}
+
+// detectShellOperator 检查参数列表中是否包含 Shell 运算符 token
+// 若发现则返回该运算符字符串及 true，否则返回空字符串及 false
+func detectShellOperator(args []string) (string, bool) {
+	for _, arg := range args {
+		if shellOperators[arg] {
+			return arg, true
+		}
+	}
+	return "", false
+}
+
+// parseCommandLine 解析命令行字符串为参数列表，遵循 POSIX Shell 引用规则：
+// - 单引号内：所有字符（包括 \）逐字保留，直到下一个单引号
+// - 双引号内：仅 \"、\\、\$、\` 有转义含义，其余 \ 原样保留
+// - 引号外：\ 转义紧随其后的单个字符（含空格）
 func parseCommandLine(cmd string) []string {
 	var args []string
 	var current strings.Builder
 	inDoubleQuotes := false
 	inSingleQuotes := false
-	escaped := false
 
 	for i := 0; i < len(cmd); i++ {
 		r := cmd[i]
-		if escaped {
+
+		// 单引号模式：逐字保留所有内容，直到遇到配对的单引号
+		if inSingleQuotes {
+			if r == '\'' {
+				inSingleQuotes = false
+			} else {
+				current.WriteByte(r)
+			}
+			continue
+		}
+
+		// 双引号模式：仅处理特定转义序列
+		if inDoubleQuotes {
+			if r == '\\' && i+1 < len(cmd) {
+				next := cmd[i+1]
+				// 双引号内仅以下字符可被 \ 转义
+				if next == '"' || next == '\\' || next == '$' || next == '`' {
+					current.WriteByte(next)
+					i++
+					continue
+				}
+			}
+			if r == '"' {
+				inDoubleQuotes = false
+				continue
+			}
 			current.WriteByte(r)
-			escaped = false
 			continue
 		}
-		if r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' && !inSingleQuotes {
-			inDoubleQuotes = !inDoubleQuotes
-			continue
-		}
-		if r == '\'' && !inDoubleQuotes {
-			inSingleQuotes = !inSingleQuotes
-			continue
-		}
-		if (r == ' ' || r == '\t') && !inDoubleQuotes && !inSingleQuotes {
+
+		// 引号外处理
+		const singleQuote = byte('\'')
+		switch r {
+		case singleQuote:
+			inSingleQuotes = true
+		case '"':
+			inDoubleQuotes = true
+		case '\\':
+			// 转义紧随其后的单个字符
+			if i+1 < len(cmd) {
+				current.WriteByte(cmd[i+1])
+				i++
+			}
+		case ' ', '\t':
 			if current.Len() > 0 {
 				args = append(args, current.String())
 				current.Reset()
 			}
-			continue
+		default:
+			current.WriteByte(r)
 		}
-		current.WriteByte(r)
 	}
 	if current.Len() > 0 {
 		args = append(args, current.String())

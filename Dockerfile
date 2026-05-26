@@ -21,12 +21,21 @@ ARG ALPINE_VERSION=3.20
 
 FROM golang:${GO_VERSION}-alpine AS builder
 
+ARG TARGETARCH=arm64
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/kom-mcp ./main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/kom-mcp ./main.go
+
+# 下载与集群兼容的 kubectl 二进制（自动识别 amd64 或 arm64）
+# Download the stable kubectl binary for the correct architecture
+RUN KUBECTL_VERSION=$(wget -qO- https://dl.k8s.io/release/stable.txt) && \
+    wget -qO /out/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
+    chmod +x /out/kubectl
 
 FROM alpine:${ALPINE_VERSION}
 
@@ -52,6 +61,9 @@ RUN apk add --no-cache ca-certificates tzdata && \
 WORKDIR ${APP_HOME}
 
 COPY --from=builder --chown=${APP_USER}:${APP_GROUP} /out/kom-mcp ${APP_HOME}/kom-mcp
+# 将 kubectl 二进制复制到 /usr/local/bin，使其在 PATH 中可被直接调用
+# Copy kubectl binary so it's available on PATH inside the container
+COPY --from=builder /out/kubectl /usr/local/bin/kubectl
 
 USER ${APP_USER}
 

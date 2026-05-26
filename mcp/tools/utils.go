@@ -138,6 +138,10 @@ func TextResult[T any](item T, meta *ResourceMetadata) (*mcp.CallToolResult, err
 	switch v := any(item).(type) {
 	case []byte:
 		return buildTextResult(string(v)), nil
+	case string:
+		// 直接返回字符串内容，避免对已是字符串的值（如 kubectl -o json 输出）
+		// 进行二次 json.Marshal，防止产生双重转义（JSON-in-JSON）
+		return buildTextResult(v), nil
 	case []string:
 		var contents []mcp.Content
 		for _, s := range v {
