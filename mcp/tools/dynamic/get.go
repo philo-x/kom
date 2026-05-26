@@ -90,9 +90,9 @@ func slimResourceMap(item map[string]interface{}) {
 	if status, ok := item["status"].(map[string]interface{}); ok {
 		for k, v := range status {
 			if sliceVal, ok := v.([]interface{}); ok {
-				if len(sliceVal) > 5 {
-					// Truncate to keep only the last 5 elements (most recent)
-					status[k] = sliceVal[len(sliceVal)-5:]
+				if len(sliceVal) > 50 {
+					// Truncate to keep only the last 50 elements (most recent)
+					status[k] = sliceVal[len(sliceVal)-50:]
 				}
 			}
 			if strVal, ok := v.(string); ok && len(strVal) > 1000 {
