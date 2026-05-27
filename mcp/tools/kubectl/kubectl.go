@@ -37,6 +37,8 @@ func KubectlTool() mcp.Tool {
 			mcp.Description("参数列表（可选，如果指定了 cmd，则优先使用 cmd 并解析） / The arguments list (optional)"),
 			mcp.Items(map[string]interface{}{"type": "string"}),
 		),
+		mcp.WithNumber("page", mcp.Description("页码，仅在执行 get 命令列出资源时有效，从1开始（默认1）/ Page number, only valid for get commands, starting from 1 (default 1)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页行数或资源数，从1开始（默认100，最大500）/ Page size, starting from 1 (default 100, max 500)")),
 	)
 }
 
@@ -141,9 +143,32 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		return nil, fmt.Errorf("kubectl execution failed: %v, output: %s", err, string(output))
 	}
 
-	// 方案A：当使用 -o json 输出时，自动剥离高噪音字段以减少 LLM token 消耗
 	result := string(output)
-	if isJSONOutput(args) {
+
+	// 如果是 get 命令，应用分页处理
+	if subcmd == "get" {
+		pageVal := request.GetInt("page", 1)
+		pageSizeVal := request.GetInt("pageSize", 100)
+		if pageVal < 1 {
+			pageVal = 1
+		}
+		if pageSizeVal < 1 {
+			pageSizeVal = 100
+		}
+		if pageSizeVal > 500 {
+			pageSizeVal = 500
+		}
+
+		if isJSONOutput(args) {
+			result = processJSONOutput(result, pageVal, pageSizeVal)
+		} else if !isCustomFormatting(args) {
+			hasHeader := !hasNoHeadersFlag(args)
+			result = paginateTable(result, pageVal, pageSizeVal, hasHeader)
+		} else if isNameOutput(args) {
+			result = paginateTable(result, pageVal, pageSizeVal, false)
+		}
+	} else if isJSONOutput(args) {
+		// 非 get 命令但输出 json，只做噪音剥离
 		result = stripJSONNoise(result)
 	}
 
@@ -366,4 +391,139 @@ func parseCommandLine(cmd string) []string {
 		args = append(args, current.String())
 	}
 	return args
+}
+
+// processJSONOutput 对 JSON 结果进行噪音剥离和分页切片处理
+func processJSONOutput(raw string, page, pageSize int) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return raw
+	}
+
+	// 1. 剥离高噪音字段
+	stripObject(obj)
+
+	// 2. 如果包含 items 数组，进行分页切片
+	if items, ok := obj["items"].([]interface{}); ok {
+		total := len(items)
+		start := (page - 1) * pageSize
+		end := start + pageSize
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+		obj["items"] = items[start:end]
+
+		// 注入分页元数据以便 Agent 感知
+		obj["total"] = total
+		obj["page"] = page
+		obj["pageSize"] = pageSize
+		totalPages := total / pageSize
+		if total%pageSize > 0 {
+			totalPages++
+		}
+		obj["totalPages"] = totalPages
+	}
+
+	cleaned, err := json.MarshalIndent(obj, "", "    ")
+	if err != nil {
+		return raw
+	}
+	return string(cleaned)
+}
+
+// paginateTable 对文本表格结果进行按行分页切片，保持表头
+func paginateTable(raw string, page, pageSize int, hasHeader bool) string {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) == 0 {
+		return raw
+	}
+
+	var header string
+	var dataLines []string
+	if hasHeader && len(lines) > 0 {
+		header = lines[0]
+		dataLines = lines[1:]
+	} else {
+		dataLines = lines
+	}
+
+	total := len(dataLines)
+	if total == 0 {
+		return raw
+	}
+
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	paginatedLines := dataLines[start:end]
+
+	var resultLines []string
+	if hasHeader {
+		resultLines = append(resultLines, header)
+	}
+	resultLines = append(resultLines, paginatedLines...)
+
+	totalPages := total / pageSize
+	if total%pageSize > 0 {
+		totalPages++
+	}
+	summary := fmt.Sprintf("\n[Pagination] Page: %d/%d, PageSize: %d, Total: %d", page, totalPages, pageSize, total)
+	resultLines = append(resultLines, summary)
+
+	return strings.Join(resultLines, "\n")
+}
+
+// isCustomFormatting 检查是否使用了 yaml, jsonpath, go-template 等自定义输出格式（需要排除在表格分页之外）
+func isCustomFormatting(args []string) bool {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-o=") || strings.HasPrefix(arg, "--output=") {
+			val := strings.SplitN(arg, "=", 2)[1]
+			if val == "yaml" || strings.HasPrefix(val, "jsonpath") || strings.HasPrefix(val, "go-template") {
+				return true
+			}
+		}
+		if arg == "-o" || arg == "--output" {
+			if i+1 < len(args) {
+				val := args[i+1]
+				if val == "yaml" || strings.HasPrefix(val, "jsonpath") || strings.HasPrefix(val, "go-template") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isNameOutput 检查是否使用了 -o name 格式
+func isNameOutput(args []string) bool {
+	for i, arg := range args {
+		switch {
+		case arg == "-o" || arg == "--output":
+			if i+1 < len(args) && args[i+1] == "name" {
+				return true
+			}
+		case arg == "-o=name" || arg == "--output=name":
+			return true
+		}
+	}
+	return false
+}
+
+// hasNoHeadersFlag 检查是否传入了 --no-headers 参数
+func hasNoHeadersFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--no-headers" {
+			return true
+		}
+	}
+	return false
 }

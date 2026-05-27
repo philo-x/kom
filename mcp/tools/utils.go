@@ -172,3 +172,35 @@ func ErrorResult(err error) *mcp.CallToolResult {
 		},
 	}
 }
+
+// ParsePagination 从 MCP 请求中解析分页参数，返回 page, pageSize, offset
+func ParsePagination(request mcp.CallToolRequest) (page, pageSize, offset int) {
+	page = request.GetInt("page", 1)
+	pageSize = request.GetInt("pageSize", 10)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	if pageSize > 500 {
+		pageSize = 500
+	}
+	offset = (page - 1) * pageSize
+	return
+}
+
+// BuildPaginatedResult 构造统一的分页返回结构
+func BuildPaginatedResult(items interface{}, total int64, page, pageSize int) PaginatedResult {
+	totalPages := int(total) / pageSize
+	if int(total)%pageSize > 0 {
+		totalPages++
+	}
+	return PaginatedResult{
+		Items:      items,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}
+}
