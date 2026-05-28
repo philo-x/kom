@@ -22,7 +22,7 @@ func DiagnosePodNetworkTool() mcp.Tool {
 		mcp.WithDescription("诊断Pod网络连通性。优先在容器内测试目标端口，若缺少工具则动态拉起临时诊断Pod进行测试。 / Diagnose pod network connectivity. First tries exec in the target pod, falls back to a temp diag pod if utilities are missing."),
 		mcp.WithTitleAnnotation("Diagnose Pod Network"),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("集群名称（使用空字符串表示默认集群）/ Cluster name")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("集群名称/Cluster name")),
 		mcp.WithString("namespace", mcp.Required(), mcp.Description("命名空间 / Namespace")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("源 Pod 名称 / Source Pod name")),
 		mcp.WithString("container", mcp.Description("容器名称 / Container name")),

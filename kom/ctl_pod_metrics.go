@@ -179,9 +179,17 @@ func ExtractPodMetrics(u *unstructured.Unstructured, containerName string) ([]*P
 		if usage, ok := containerMap["usage"].(map[string]interface{}); ok {
 			if cpuStr, ok := usage["cpu"].(string); ok {
 				containerMetric.Usage.CPU = cpuStr
+				if cpuQty, err := resource.ParseQuantity(cpuStr); err == nil {
+					containerMetric.Usage.CPUNano = cpuQty.MilliValue()
+					containerMetric.Usage.CPU = utils.FormatResource(cpuQty, corev1.ResourceCPU)
+				}
 			}
 			if memStr, ok := usage["memory"].(string); ok {
 				containerMetric.Usage.Memory = memStr
+				if memQty, err := resource.ParseQuantity(memStr); err == nil {
+					containerMetric.Usage.MemoryByte = memQty.Value()
+					containerMetric.Usage.Memory = utils.FormatResource(memQty, corev1.ResourceMemory)
+				}
 			}
 		}
 

@@ -36,8 +36,8 @@ func (c *ClusterInstances) RegisterAWSCluster(config *aws.EKSAuthConfig, opts ..
 		return nil, fmt.Errorf("RegisterAWSCluster: region or cluster_name is empty")
 	}
 	// 生成集群ID
-    clusterID := fmt.Sprintf("%s-%s", config.Region, config.ClusterName)
-    return c.RegisterAWSClusterWithID(config, clusterID, opts...)
+	clusterID := fmt.Sprintf("%s-%s", config.Region, config.ClusterName)
+	return c.RegisterAWSClusterWithID(config, clusterID, opts...)
 }
 
 // RegisterAWSClusterWithID 通过指定ID注册EKS集群
@@ -130,7 +130,7 @@ func (c *ClusterInstances) RegisterAWSClusterWithID(config *aws.EKSAuthConfig, c
 	clusterInstances.clusters.Store(clusterID, cluster)
 
 	// 使用kubeconfig注册集群
-    kubectl, err := c.RegisterByStringWithID(kubeconfigContent, clusterID, opts...)
+	kubectl, err := c.RegisterByStringWithID(kubeconfigContent, clusterID, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register EKS cluster %s: %w", clusterID, err)
 	}

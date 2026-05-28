@@ -17,7 +17,7 @@ func TopNode() mcp.Tool {
 		mcp.WithDescription("获取Node节点 CPU 内存 资源用量排名 列表 (类似命令 kubectl top nodes -n ns)"),
 		mcp.WithTitleAnnotation("Get Node Resource Usage"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行资源的集群（使用空字符串表示默认集群）/ Cluster where the resources are running (use empty string for default cluster)")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行资源的集群/Cluster where the resources are running")),
 	)
 }
 

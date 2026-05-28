@@ -19,7 +19,7 @@ func GetResourceMetricsHistoryTool() mcp.Tool {
 		mcp.WithDescription("获取Pod或Node资源（CPU/Memory）的Prometheus历史指标。 / Get historical CPU/Memory metrics for a Pod or Node from Prometheus."),
 		mcp.WithTitleAnnotation("Get Metrics History"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("集群名称（使用空字符串表示默认集群）/ Cluster name")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("集群名称/Cluster name")),
 		mcp.WithString("namespace", mcp.Required(), mcp.Description("资源所在的命名空间（如果是Node则填空或default）/ Namespace")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("资源名称 (Pod名或Node名) / Resource name")),
 		mcp.WithString("kind", mcp.Required(), mcp.Description("资源类型 (Pod 或 Node) / Resource kind")),
@@ -146,7 +146,23 @@ func GetResourceMetricsHistoryHandler(ctx context.Context, request mcp.CallToolR
 }
 
 func autodetectPrometheus(ctx context.Context, clientset *kubernetes.Clientset) (string, string) {
-	namespaces := []string{"monitoring", "kube-system", "default"}
+	namespaces := []string{"monitoring", "kube-system", "cpaas-system", "default"}
+
+	// Pass 1: Look for Thanos Query HTTP service first (highest priority in Thanos architecture)
+	list, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, svc := range list.Items {
+			name := strings.ToLower(svc.Name)
+			if strings.Contains(name, "thanos-query") || (strings.Contains(name, "thanos") && strings.Contains(name, "query")) {
+				if strings.Contains(name, "grpc") {
+					continue
+				}
+				return svc.Namespace, svc.Name
+			}
+		}
+	}
+
+	// Pass 2: Label selector search with service name exclusion filter
 	selectors := []string{
 		"app=prometheus",
 		"app=prometheus-k8s",
@@ -158,14 +174,40 @@ func autodetectPrometheus(ctx context.Context, clientset *kubernetes.Clientset) 
 		for _, sel := range selectors {
 			list, err := clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
 			if err == nil && len(list.Items) > 0 {
-				return ns, list.Items[0].Name
+				for _, svc := range list.Items {
+					name := strings.ToLower(svc.Name)
+					if strings.Contains(name, "grpc") ||
+						strings.Contains(name, "adapter") ||
+						strings.Contains(name, "operator") ||
+						strings.Contains(name, "exporter") ||
+						strings.Contains(name, "alertmanager") ||
+						strings.Contains(name, "pushgateway") {
+						continue
+					}
+					return ns, svc.Name
+				}
 			}
 		}
 	}
 
-	// Fallback search
-	list, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
-	if err == nil {
+	// Pass 3: Fallback search for any high-probability Prometheus service name
+	if err == nil && list != nil {
+		for _, svc := range list.Items {
+			name := strings.ToLower(svc.Name)
+			if strings.Contains(name, "prometheus") {
+				if strings.Contains(name, "adapter") ||
+					strings.Contains(name, "operator") ||
+					strings.Contains(name, "exporter") ||
+					strings.Contains(name, "alertmanager") ||
+					strings.Contains(name, "pushgateway") ||
+					strings.Contains(name, "grpc") {
+					continue
+				}
+				return svc.Namespace, svc.Name
+			}
+		}
+
+		// Pass 4: Fallback to any service containing "prometheus"
 		for _, svc := range list.Items {
 			if strings.Contains(strings.ToLower(svc.Name), "prometheus") {
 				return svc.Namespace, svc.Name

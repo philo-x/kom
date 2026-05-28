@@ -31,7 +31,7 @@ func KubectlTool() mcp.Tool {
 		),
 		mcp.WithTitleAnnotation("Execute Kubectl Command"),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行命令的集群（使用空字符串表示默认集群）/ Cluster where the command is executed (use empty string for default cluster)")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行命令的集群/Cluster where the command is executed")),
 		mcp.WithString("cmd", mcp.Description("要执行的 kubectl 命令字符串，例如 'get pods -n default'。不支持管道和外部命令。/ The kubectl command string to execute, e.g., 'get pods -n default'. Pipes and external commands are not supported.")),
 		mcp.WithArray("args",
 			mcp.Description("参数列表（可选，如果指定了 cmd，则优先使用 cmd 并解析） / The arguments list (optional)"),

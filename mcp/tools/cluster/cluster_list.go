@@ -31,11 +31,11 @@ func ListClustersHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp
 			"host":    cluster.Config.Host,
 			"version": "unknown",
 		}
-		
+
 		if cluster.GetServerVersion() != nil {
 			clusterInfo["version"] = cluster.GetServerVersion().GitVersion
 		}
-		
+
 		result = append(result, clusterInfo)
 	}
 

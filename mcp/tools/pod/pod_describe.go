@@ -17,7 +17,7 @@ func DescribePod() mcp.Tool {
 		mcp.WithDescription("描述Pod容器组，(类似命令: kubectl describe pod -n <namespace> pod_name ) "),
 		mcp.WithTitleAnnotation("Describe Pod"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("Pod所在集群（使用空字符串表示默认集群）")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("Pod所在集群")),
 		mcp.WithString("namespace", mcp.Required(), mcp.Description("Pod所在的命名空间（集群范围资源可选）")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Pod名称")),
 	)

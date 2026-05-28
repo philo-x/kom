@@ -16,7 +16,7 @@ func ApplyDynamicResource() mcp.Tool {
 		mcp.WithTitleAnnotation("Apply YAML"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithString("yaml", mcp.Description("需要应用的YAML内容 / YAML content containing resources to apply")),
-		mcp.WithString("cluster", mcp.Description("目标集群（空值表示默认集群） / Target cluster (empty for default)")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("目标集群/Target cluster")),
 	)
 }
 

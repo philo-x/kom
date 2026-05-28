@@ -1,11 +1,12 @@
 package kom
 
 import (
-    "fmt"
+	"encoding/json"
+	"fmt"
 
-    "github.com/weibaohui/kom/utils"
-    corev1 "k8s.io/api/core/v1"
-    "k8s.io/apimachinery/pkg/api/resource"
+	"github.com/weibaohui/kom/utils"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // UsageDenominator 表示资源占比计算的分母选项
@@ -15,29 +16,29 @@ import (
 type UsageDenominator int
 
 const (
-    DenominatorAuto UsageDenominator = iota
-    DenominatorNode
-    DenominatorLimit
+	DenominatorAuto UsageDenominator = iota
+	DenominatorNode
+	DenominatorLimit
 )
 
 func (d UsageDenominator) String() string {
-    switch d {
-    case DenominatorAuto:
-        return "auto"
-    case DenominatorNode:
-        return "node"
-    case DenominatorLimit:
-        return "limit"
-    default:
-        return "unknown"
-    }
+	switch d {
+	case DenominatorAuto:
+		return "auto"
+	case DenominatorNode:
+		return "node"
+	case DenominatorLimit:
+		return "limit"
+	default:
+		return "unknown"
+	}
 }
 
 // ResourceUsageFraction 定义单种资源的使用占比（相对于分母选项）
 type ResourceUsageFraction struct {
-    RequestFraction  string `json:"requestFraction"`  // 请求使用占比（百分比）
-    LimitFraction    string `json:"limitFraction"`    // 限制使用占比（百分比）
-    RealtimeFraction string `json:"realtimeFraction"` // 实时指标显示的占比（百分比）
+	RequestFraction  string `json:"requestFraction"`  // 请求使用占比（百分比）
+	LimitFraction    string `json:"limitFraction"`    // 限制使用占比（百分比）
+	RealtimeFraction string `json:"realtimeFraction"` // 实时指标显示的占比（百分比）
 }
 
 // ResourceUsageResult 定义资源使用情况的结构体
@@ -46,7 +47,7 @@ type ResourceUsageResult struct {
 	Requests       map[corev1.ResourceName]resource.Quantity     `json:"requests"` // 请求用量
 	Limits         map[corev1.ResourceName]resource.Quantity     `json:"limits"`   // 限制用量
 	Realtime       map[corev1.ResourceName]resource.Quantity     `json:"realtime"`
-    Allocatable    map[corev1.ResourceName]resource.Quantity     `json:"allocatable"`    // 节点可分配的实时值（用于表格 Total）
+	Allocatable    map[corev1.ResourceName]resource.Quantity     `json:"allocatable"`    // 节点可分配的实时值（用于表格 Total）
 	UsageFractions map[corev1.ResourceName]ResourceUsageFraction `json:"usageFractions"` // 使用占比
 }
 
@@ -92,4 +93,51 @@ func convertToTableData(result *ResourceUsageResult) ([]*ResourceUsageRow, error
 	}
 
 	return tableData, nil
+}
+
+// ResourceUsageResultJSON is a helper struct to customize the JSON serialization of ResourceUsageResult
+type ResourceUsageResultJSON struct {
+	Requests         map[corev1.ResourceName]string                `json:"requests"`
+	RequestsValue    map[corev1.ResourceName]int64                 `json:"requests_value"`
+	Limits           map[corev1.ResourceName]string                `json:"limits"`
+	LimitsValue      map[corev1.ResourceName]int64                 `json:"limits_value"`
+	Realtime         map[corev1.ResourceName]string                `json:"realtime"`
+	RealtimeValue    map[corev1.ResourceName]int64                 `json:"realtime_value"`
+	Allocatable      map[corev1.ResourceName]string                `json:"allocatable"`
+	AllocatableValue map[corev1.ResourceName]int64                 `json:"allocatable_value"`
+	UsageFractions   map[corev1.ResourceName]ResourceUsageFraction `json:"usageFractions"`
+}
+
+// MarshalJSON implements the json.Marshaler interface for ResourceUsageResult to provide cleaner formats for LLMs.
+func (r *ResourceUsageResult) MarshalJSON() ([]byte, error) {
+	toJsonMap := func(m map[corev1.ResourceName]resource.Quantity) (map[corev1.ResourceName]string, map[corev1.ResourceName]int64) {
+		human := make(map[corev1.ResourceName]string)
+		val := make(map[corev1.ResourceName]int64)
+		for k, q := range m {
+			human[k] = utils.FormatResource(q, k)
+			if k == corev1.ResourceCPU {
+				val[k] = q.MilliValue()
+			} else {
+				val[k] = q.Value()
+			}
+		}
+		return human, val
+	}
+
+	reqHuman, reqVal := toJsonMap(r.Requests)
+	limHuman, limVal := toJsonMap(r.Limits)
+	rtHuman, rtVal := toJsonMap(r.Realtime)
+	alcHuman, alcVal := toJsonMap(r.Allocatable)
+
+	return json.Marshal(ResourceUsageResultJSON{
+		Requests:         reqHuman,
+		RequestsValue:    reqVal,
+		Limits:           limHuman,
+		LimitsValue:      limVal,
+		Realtime:         rtHuman,
+		RealtimeValue:    rtVal,
+		Allocatable:      alcHuman,
+		AllocatableValue: alcVal,
+		UsageFractions:   r.UsageFractions,
+	})
 }

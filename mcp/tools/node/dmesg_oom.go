@@ -17,7 +17,7 @@ func GetNodeDmesgOOMTool() mcp.Tool {
 		mcp.WithDescription("扫描节点内核日志（dmesg/syslog/messages）中是否有内存溢出（OOM-killer）记录。 / Scan node kernel logs for Out-of-Memory (OOM-killer) events."),
 		mcp.WithTitleAnnotation("Get Node OOM Logs"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("集群名称（使用空字符串表示默认集群）/ Cluster name")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("集群名称/Cluster name")),
 		mcp.WithString("node_name", mcp.Required(), mcp.Description("节点名称 / Node name")),
 	)
 }

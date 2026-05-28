@@ -17,7 +17,7 @@ func ListEventResource() mcp.Tool {
 		mcp.WithDescription("按集群和命名空间列出Kubernetes事件 (等同于: kubectl get events -n <namespace>)。返回结果为分页格式，包含 items（当前页数据）、total（总数）、page（当前页码）、pageSize（每页大小）、totalPages（总页数）。如需获取更多数据，请增大 page 参数值。/ List Kubernetes events with pagination. Response includes items, total, page, pageSize, totalPages."),
 		mcp.WithTitleAnnotation("List Events"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行事件的集群（使用空字符串表示默认集群）/ Cluster where the events are running (use empty string for default cluster)")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行事件的集群/Cluster where the events are running")),
 		mcp.WithString("namespace", mcp.Description("事件所在的命名空间（可选）/ Namespace of the events (optional)")),
 		mcp.WithString("involvedObjectName", mcp.Description("按涉及对象名称过滤事件 / Filter events by involved object name")),
 		mcp.WithString("involvedObjectKind", mcp.Description("按涉及对象类型过滤事件 (如 Pod, Deployment, Node) / Filter events by involved object kind (e.g. Pod, Deployment, Node)")),

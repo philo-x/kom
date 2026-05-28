@@ -16,7 +16,7 @@ func RestartDaemonSetTool() mcp.Tool {
 		mcp.WithDescription("通过集群、命名空间和名称,重启DaemonSet。对应kubectl命令: kubectl rollout restart daemonset/<name> -n <namespace> / Restart daemonset by cluster, namespace and name. Equivalent kubectl command: kubectl rollout restart daemonset/<name> -n <namespace>"),
 		mcp.WithTitleAnnotation("Restart DaemonSet"),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行DaemonSet的集群 （使用空字符串表示默认集群）/ The cluster runs the daemonset")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行DaemonSet的集群/The cluster runs the daemonset")),
 		mcp.WithString("namespace", mcp.Description("DaemonSet所在的命名空间 / The namespace of the daemonset")),
 		mcp.WithString("name", mcp.Description("DaemonSet的名称 / The name of the daemonset")),
 	)

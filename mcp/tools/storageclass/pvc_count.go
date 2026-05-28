@@ -15,7 +15,7 @@ func GetStorageClassPVCCountTool() mcp.Tool {
 		mcp.WithDescription("获取StorageClass下的PVC数量 / Get PVC count of StorageClass (等同于 kubectl get pvc -l \"storageclass.kubernetes.io/name=<storageclass-name>\" --no-headers | wc -l)"),
 		mcp.WithTitleAnnotation("Get StorageClass PVC Count"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("StorageClass所在的集群（使用空字符串表示默认集群） / The cluster of the StorageClass")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("StorageClass所在的集群/The cluster of the StorageClass")),
 		mcp.WithString("name", mcp.Description("StorageClass的名称 / The name of the StorageClass")),
 	)
 }

@@ -51,13 +51,8 @@ func (p *pod) ResourceUsage(denom ...UsageDenominator) (*ResourceUsageResult, er
 			if metric.Name != "total" {
 				continue
 			}
-			if cpuQty, err := resource.ParseQuantity(metric.Usage.CPU); err == nil {
-				realtimeMetrics[v1.ResourceCPU] = cpuQty
-			}
-			if memQty, err := resource.ParseQuantity(metric.Usage.Memory); err == nil {
-				realtimeMetrics[v1.ResourceMemory] = memQty
-			}
-
+			realtimeMetrics[v1.ResourceCPU] = *resource.NewMilliQuantity(metric.Usage.CPUNano, resource.DecimalSI)
+			realtimeMetrics[v1.ResourceMemory] = *resource.NewQuantity(metric.Usage.MemoryByte, resource.BinarySI)
 		}
 	}
 

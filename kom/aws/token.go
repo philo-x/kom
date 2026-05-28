@@ -50,7 +50,7 @@ func (tm *TokenManager) initAWSConfig(ctx context.Context) error {
 	if tm.eksConfig.Region != "" {
 		opts = append(opts, config.WithRegion(tm.eksConfig.Region))
 	}
- 
+
 	awsConfig, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return NewEKSAuthError(ErrorTypeAWSConfigMissing, "failed to load AWS config", err)

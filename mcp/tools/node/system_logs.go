@@ -15,7 +15,7 @@ func GetNodeSystemLogsTool() mcp.Tool {
 		mcp.WithDescription("获取指定节点的系统组件日志（如 kubelet, containerd 等）。从 Kubelet logs 代理接口拉取。 / Retrieve system service logs (kubelet, containerd, etc.) from Kubelet logs proxy."),
 		mcp.WithTitleAnnotation("Get Node System Logs"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("集群名称（使用空字符串表示默认集群）/ Cluster name")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("集群名称/Cluster name")),
 		mcp.WithString("node_name", mcp.Required(), mcp.Description("节点名称 / Node name")),
 		mcp.WithString("service", mcp.Required(), mcp.Description("服务组件名称 (如 kubelet, containerd, docker) / Service unit name (e.g. kubelet, containerd, docker)")),
 		mcp.WithNumber("tail_lines", mcp.Description("返回最后的日志行数（默认 100）/ Number of tail log lines (default 100)")),

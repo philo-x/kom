@@ -39,19 +39,8 @@ func (d *node) ResourceUsage() (*ResourceUsageResult, error) {
 	realtimeMetrics := make(map[v1.ResourceName]resource.Quantity)
 
 	if metrics, err := d.Metrics(); err == nil {
-		cpu := metrics.CPU
-		if cpu != "" {
-			if cpuQty, err := resource.ParseQuantity(cpu); err == nil {
-				realtimeMetrics[v1.ResourceCPU] = cpuQty
-			}
-		}
-		memory := metrics.Memory
-		if memory != "" {
-			if memQty, err := resource.ParseQuantity(memory); err == nil {
-				realtimeMetrics[v1.ResourceMemory] = memQty
-			}
-		}
-
+		realtimeMetrics[v1.ResourceCPU] = *resource.NewMilliQuantity(metrics.CPUNano, resource.DecimalSI)
+		realtimeMetrics[v1.ResourceMemory] = *resource.NewQuantity(metrics.MemoryByte, resource.BinarySI)
 	}
 
 	reqs, limits := d.TotalRequestsAndLimits()
@@ -193,7 +182,7 @@ func (d *node) Metrics() (*NodeUsage, error) {
 	return usage, nil
 }
 
-// ExtractNodeMetrics 从非结构化的 Kubernetes 节点指标对象中提取 CPU 和内存使用量，返回 NodeUsage 结构体。  
+// ExtractNodeMetrics 从非结构化的 Kubernetes 节点指标对象中提取 CPU 和内存使用量，返回 NodeUsage 结构体。
 // 如果未找到 usage 字段或类型不匹配，则返回错误。
 func ExtractNodeMetrics(u *unstructured.Unstructured) (*NodeUsage, error) {
 	usageRaw, found, err := unstructured.NestedMap(u.Object, "usage")
@@ -204,10 +193,23 @@ func ExtractNodeMetrics(u *unstructured.Unstructured) (*NodeUsage, error) {
 		return nil, fmt.Errorf("containers not found in object")
 	}
 	klog.V(6).Infof("usageraw %s", usageRaw)
+	cpuStr := usageRaw[corev1.ResourceCPU.String()].(string)
+	memStr := usageRaw[corev1.ResourceMemory.String()].(string)
+
 	nodeUsage := &NodeUsage{
-		CPU:    usageRaw[corev1.ResourceCPU.String()].(string),
-		Memory: usageRaw[corev1.ResourceMemory.String()].(string),
+		CPU:    cpuStr,
+		Memory: memStr,
 	}
+
+	if cpuQty, err := resource.ParseQuantity(cpuStr); err == nil {
+		nodeUsage.CPUNano = cpuQty.MilliValue()
+		nodeUsage.CPU = utils.FormatResource(cpuQty, corev1.ResourceCPU)
+	}
+	if memQty, err := resource.ParseQuantity(memStr); err == nil {
+		nodeUsage.MemoryByte = memQty.Value()
+		nodeUsage.Memory = utils.FormatResource(memQty, corev1.ResourceMemory)
+	}
+
 	klog.V(6).Infof("node/%s resource usage\n", utils.ToJSON(nodeUsage))
 	return nodeUsage, nil
 }

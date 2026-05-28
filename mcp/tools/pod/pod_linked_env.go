@@ -16,7 +16,7 @@ func GetPodLinkedEnvTool() mcp.Tool {
 		mcp.WithDescription("通过进入pod执行Env命令，获取Pod运行时的环境变量信息 (类似命令: kubectl exec -n <namespace> <pod-name> -- env) / Get pod runtime environment variables by executing Env command"),
 		mcp.WithTitleAnnotation("Get Pod Environment Variables"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行Pod的集群 （使用空字符串表示默认集群） / The cluster runs the pod")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行Pod的集群/The cluster runs the pod")),
 		mcp.WithString("namespace", mcp.Description("Pod所在的命名空间 / The namespace of the pod")),
 		mcp.WithString("name", mcp.Description("Pod的名称 / The name of the pod")),
 	)
@@ -47,7 +47,7 @@ func GetPodLinkedEnvFromPodYamlTool() mcp.Tool {
 		mcp.WithDescription("通过Pod yaml 定义 获取Pod定义中的环境变量信息 (类似命令: kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].env}') / Get environment variables from pod definition"),
 		mcp.WithTitleAnnotation("Get Pod Env from YAML"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("运行Pod的集群 （使用空字符串表示默认集群） / The cluster runs the pod")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行Pod的集群/The cluster runs the pod")),
 		mcp.WithString("namespace", mcp.Description("Pod所在的命名空间 / The namespace of the pod")),
 		mcp.WithString("name", mcp.Description("Pod的名称 / The name of the pod")),
 	)

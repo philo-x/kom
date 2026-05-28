@@ -18,7 +18,7 @@ func TestPodDNSResolveTool() mcp.Tool {
 		mcp.WithDescription("在Pod内部进行DNS解析测试，检查解析链条并诊断CoreDNS服务状态。 / Test DNS resolution inside Pod, check resolv.conf, and diagnose CoreDNS health."),
 		mcp.WithTitleAnnotation("Test DNS Resolve"),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("cluster", mcp.Description("集群名称（使用空字符串表示默认集群）/ Cluster name")),
+		mcp.WithString("cluster", mcp.Required(), mcp.Description("集群名称/Cluster name")),
 		mcp.WithString("namespace", mcp.Required(), mcp.Description("命名空间 / Namespace")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("源 Pod 名称 / Source Pod name")),
 		mcp.WithString("container", mcp.Description("容器名称 / Container name")),

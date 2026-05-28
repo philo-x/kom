@@ -2,14 +2,21 @@ package kom
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 // PrometheusService 提供基于当前集群的 Prometheus 访问能力。
@@ -142,17 +149,242 @@ func (q *PromQuery) getContext() context.Context {
 	return ctx
 }
 
-// api 构造 Prometheus v1 API 客户端。
+type tokenRoundTripper struct {
+	token string
+	rt    http.RoundTripper
+}
+
+func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Bearer "+t.token)
+	}
+	return t.rt.RoundTrip(req)
+}
+
 func (c *PromClient) api() (promv1.API, error) {
 	addr := c.address
 	if addr == "" {
 		return nil, fmt.Errorf("prometheus address is not configured")
 	}
-	cli, err := api.NewClient(api.Config{Address: addr})
+	var roundTripper http.RoundTripper = api.DefaultRoundTripper
+
+	// 检查是否通过 Kubernetes API Server 代理查询 Prometheus
+	isProxy := false
+	if c.service != nil && c.service.kubectl != nil {
+		restConfig := c.service.kubectl.RestConfig()
+		if restConfig != nil && restConfig.Host != "" {
+			// 1. 如果 addr 是集群内部域名且不包含 API Server 地址，自动重写为 API Server 代理地址
+			if strings.Contains(addr, ".svc") && !strings.Contains(addr, restConfig.Host) {
+				promNs, promSvc := parseNamespaceAndService(addr)
+				if promNs != "" && promSvc != "" {
+					scheme, port := parseSchemeAndPort(addr)
+					// 构造 API Server 代理地址
+					svcPart := fmt.Sprintf("%s:%s:%d", scheme, promSvc, port)
+					proxyAddr := fmt.Sprintf("%s/api/v1/namespaces/%s/services/%s/proxy",
+						strings.TrimSuffix(restConfig.Host, "/"),
+						promNs,
+						svcPart)
+					klog.Infof("Rewriting Prometheus address from %s to API Server proxy address %s", addr, proxyAddr)
+					addr = proxyAddr
+					isProxy = true
+				}
+			} else if strings.Contains(addr, restConfig.Host) || strings.Contains(addr, "/proxy") {
+				// 已经处于代理形式
+				isProxy = true
+			}
+
+			// 2. 如果是代理模式，配置 API Server 认证传输，并跳过 TLS 证书校验
+			if isProxy {
+				proxyConfig := rest.CopyConfig(restConfig)
+				proxyConfig.TLSClientConfig.Insecure = true
+				proxyConfig.TLSClientConfig.CAData = nil
+				proxyConfig.TLSClientConfig.CAFile = ""
+				rt, err := rest.TransportFor(proxyConfig)
+				if err == nil {
+					roundTripper = rt
+				} else {
+					klog.Errorf("Failed to get transport for API Server proxy: %v", err)
+				}
+			}
+		}
+	}
+
+	if !isProxy && c.service != nil && c.service.kubectl != nil {
+		// 默认跳过 TLS 证书校验
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		roundTripper = tr
+	}
+
+	// 3. 无论是否是代理模式，只要是在集群上下文中且能够解析出 namespace/service，都应该尝试注入 Token
+	if c.service != nil && c.service.kubectl != nil {
+		ctx := c.service.kubectl.Statement.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		var promNs, promSvc string
+		if isProxy {
+			promNs, promSvc = parseNamespaceAndServiceFromProxy(addr)
+		} else {
+			promNs, promSvc = parseNamespaceAndService(addr)
+		}
+
+		if promNs != "" && promSvc != "" {
+			token, err := c.service.getServiceAccountToken(ctx, promNs, promSvc)
+			if err != nil {
+				klog.Errorf("Failed to get ServiceAccount token for prometheus service %s/%s: %v", promNs, promSvc, err)
+			} else if token != "" {
+				roundTripper = &tokenRoundTripper{
+					token: token,
+					rt:    roundTripper,
+				}
+			}
+		}
+	}
+
+	cli, err := api.NewClient(api.Config{
+		Address:      addr,
+		RoundTripper: roundTripper,
+	})
 	if err != nil {
 		return nil, err
 	}
 	return promv1.NewAPI(cli), nil
+}
+
+// parseNamespaceAndServiceFromProxy 从 API Server 代理地址中解析命名空间和服务名。
+// 例如：https://100.115.101.200:6443/api/v1/namespaces/cpaas-system/services/https:cpaas-monitor-prometheus-adapter:443/proxy -> cpaas-system, cpaas-monitor-prometheus-adapter
+func parseNamespaceAndServiceFromProxy(addr string) (string, string) {
+	nsIdx := strings.Index(addr, "/namespaces/")
+	svcIdx := strings.Index(addr, "/services/")
+	proxyIdx := strings.Index(addr, "/proxy")
+	if nsIdx == -1 || svcIdx == -1 || proxyIdx == -1 || nsIdx >= svcIdx || svcIdx >= proxyIdx {
+		return "", ""
+	}
+
+	nsStart := nsIdx + len("/namespaces/")
+	namespace := addr[nsStart:svcIdx]
+
+	svcStart := svcIdx + len("/services/")
+	svcPart := addr[svcStart:proxyIdx]
+
+	if strings.HasPrefix(svcPart, "https:") {
+		svcPart = svcPart[len("https:"):]
+	} else if strings.HasPrefix(svcPart, "http:") {
+		svcPart = svcPart[len("http:"):]
+	}
+
+	if colonIdx := strings.Index(svcPart, ":"); colonIdx != -1 {
+		svcPart = svcPart[:colonIdx]
+	}
+
+	return namespace, svcPart
+}
+
+// parseSchemeAndPort 从地址中解析协议和端口
+func parseSchemeAndPort(addr string) (string, int) {
+	scheme := "http"
+	port := 80
+
+	parts := strings.Split(addr, "://")
+	if len(parts) >= 2 {
+		scheme = parts[0]
+		hostPort := parts[1]
+		if colonIdx := strings.Index(hostPort, ":"); colonIdx != -1 {
+			portStr := hostPort[colonIdx+1:]
+			// 去除可能存在的路径后缀
+			if slashIdx := strings.Index(portStr, "/"); slashIdx != -1 {
+				portStr = portStr[:slashIdx]
+			}
+			var p int
+			if _, err := fmt.Sscanf(portStr, "%d", &p); err == nil {
+				port = p
+			}
+		} else {
+			if scheme == "https" {
+				port = 443
+			}
+		}
+	}
+	return scheme, port
+}
+
+// parseNamespaceAndService 从 Service 地址中解析出命名空间和服务名。
+// 例如：https://cpaas-monitor-prometheus-adapter.cpaas-system.svc:443 -> cpaas-system, cpaas-monitor-prometheus-adapter
+func parseNamespaceAndService(addr string) (string, string) {
+	parts := strings.Split(addr, "://")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	hostPort := parts[1]
+	host := strings.Split(hostPort, ":")[0]
+	domainParts := strings.Split(host, ".")
+	if len(domainParts) >= 3 && domainParts[2] == "svc" {
+		return domainParts[1], domainParts[0]
+	}
+	return "", ""
+}
+
+// getServiceAccountToken 通过 TokenRequest API 动态为指定 ServiceAccount 生成 Token。
+func (s *PrometheusService) getServiceAccountToken(ctx context.Context, namespace, svcName string) (string, error) {
+	clientset := s.kubectl.Client()
+	if clientset == nil {
+		return "", fmt.Errorf("failed to get kubernetes clientset")
+	}
+
+	var saName string
+
+	// 1. 尝试通过 Service 的 Selector 查找匹配的 Pods，获取 Pod 的 ServiceAccountName
+	svc, err := clientset.CoreV1().Services(namespace).Get(ctx, svcName, metav1.GetOptions{})
+	if err == nil && svc != nil && len(svc.Spec.Selector) > 0 {
+		selector := labels.Set(svc.Spec.Selector).AsSelector().String()
+		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err == nil && len(pods.Items) > 0 {
+			saName = pods.Items[0].Spec.ServiceAccountName
+			klog.V(4).Infof("Found ServiceAccount %q for service %s/%s from pod %s", saName, namespace, svcName, pods.Items[0].Name)
+		}
+	}
+
+	// 2. 如果通过 Pod selector 没找到，尝试寻找同名的 Deployment
+	if saName == "" {
+		deploy, err := clientset.AppsV1().Deployments(namespace).Get(ctx, svcName, metav1.GetOptions{})
+		if err == nil && deploy != nil {
+			saName = deploy.Spec.Template.Spec.ServiceAccountName
+			klog.V(4).Infof("Found ServiceAccount %q for service %s/%s from deployment", saName, namespace, svcName)
+		}
+	}
+
+	// 3. 如果还是没有，默认使用服务名作为 ServiceAccount 名字
+	if saName == "" {
+		saName = svcName
+	}
+
+	klog.Infof("Requesting token for ServiceAccount %s/%s (service: %s)", namespace, saName, svcName)
+
+	expiration := int64(3600)
+	tr := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			ExpirationSeconds: &expiration,
+		},
+	}
+	tokenReq, err := clientset.CoreV1().ServiceAccounts(namespace).CreateToken(ctx, saName, tr, metav1.CreateOptions{})
+	if err != nil {
+		klog.Warningf("Failed to create token for ServiceAccount %s/%s: %v. Retrying with default ServiceAccount", namespace, saName, err)
+		if saName != "default" {
+			tokenReq, err = clientset.CoreV1().ServiceAccounts(namespace).CreateToken(ctx, "default", tr, metav1.CreateOptions{})
+			if err != nil {
+				klog.Errorf("Failed to create token for default ServiceAccount in %s: %v", namespace, err)
+			}
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return tokenReq.Status.Token, nil
 }
 
 // resolveAddress 根据命名空间和服务名称解析 Prometheus 地址。
@@ -189,19 +421,42 @@ func (s *PrometheusService) resolveAddress(namespace, svcName string) string {
 		return ""
 	}
 
-	// 格式：http://service-name.namespace.svc:port
-	return fmt.Sprintf("http://%s.%s.svc:%d", svc.Name, svc.Namespace, port)
+	scheme := s.getScheme(&svc, port)
+
+	// 格式：scheme://service-name.namespace.svc:port
+	return fmt.Sprintf("%s://%s.%s.svc:%d", scheme, svc.Name, svc.Namespace, port)
+}
+
+// getScheme 根据 Service 端口属性判断使用 http 还是 https 协议。
+func (s *PrometheusService) getScheme(svc *v1.Service, port int32) string {
+	if svc == nil {
+		return "http"
+	}
+	for _, p := range svc.Spec.Ports {
+		if p.Port == port {
+			if p.AppProtocol != nil && strings.EqualFold(*p.AppProtocol, "https") {
+				return "https"
+			}
+			if strings.Contains(strings.ToLower(p.Name), "https") {
+				return "https"
+			}
+		}
+	}
+	if port == 443 || port == 8443 || port == 6443 {
+		return "https"
+	}
+	return "http"
 }
 
 // findPrometheusPort 从 Service 中查找 Prometheus 的端口号。
-// 通常 Prometheus 使用 9090 端口，或者端口名为 web/http/prometheus。
+// 通常 Prometheus 使用 9090 端口，或者端口名为 web/http/prometheus/https。
 func (s *PrometheusService) findPrometheusPort(svc *v1.Service) int32 {
 	if svc == nil || len(svc.Spec.Ports) == 0 {
 		return 0
 	}
 
 	// 常见的 Prometheus 端口名称
-	preferredPortNames := []string{"web", "http", "prometheus", "metrics"}
+	preferredPortNames := []string{"web", "http", "prometheus", "metrics", "https"}
 
 	// 优先查找命名端口
 	for _, portName := range preferredPortNames {
