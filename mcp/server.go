@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/weibaohui/kom/kom"
 	"github.com/weibaohui/kom/mcp/tools"
+	"github.com/weibaohui/kom/mcp/tools/alb2"
 	"github.com/weibaohui/kom/mcp/tools/cluster"
 	"github.com/weibaohui/kom/mcp/tools/daemonset"
 	"github.com/weibaohui/kom/mcp/tools/deployment"
@@ -318,6 +319,7 @@ func GetMCPServerWithOption(cfg *ServerConfig) *server.MCPServer {
 	ns.RegisterTools(s)
 	daemonset.RegisterTools(s)
 	kubectl.RegisterTools(s)
+	alb2.RegisterTools(s)
 	return s
 
 }
