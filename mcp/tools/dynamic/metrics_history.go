@@ -148,8 +148,19 @@ func GetResourceMetricsHistoryHandler(ctx context.Context, request mcp.CallToolR
 func autodetectPrometheus(ctx context.Context, clientset *kubernetes.Clientset) (string, string) {
 	namespaces := []string{"monitoring", "kube-system", "cpaas-system", "default"}
 
-	// Pass 1: Look for Thanos Query HTTP service first (highest priority in Thanos architecture)
 	list, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+
+	// Pass 1: Look for prometheus-operated first (highest priority, direct unauthenticated access to Prometheus engines)
+	if err == nil {
+		for _, svc := range list.Items {
+			name := strings.ToLower(svc.Name)
+			if name == "prometheus-operated" {
+				return svc.Namespace, svc.Name
+			}
+		}
+	}
+
+	// Pass 2: Look for Thanos Query HTTP service next
 	if err == nil {
 		for _, svc := range list.Items {
 			name := strings.ToLower(svc.Name)

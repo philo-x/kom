@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/weibaohui/kom/kom"
@@ -22,12 +23,13 @@ func KubectlTool() mcp.Tool {
 		"kubectl",
 		mcp.WithDescription(
 			"Read-only kubectl fallback tool. No shell pipes/redirects/external commands (grep,jq,awk).\n"+
+				"Note: For complex queries (e.g. jsonpath, custom-columns, custom quoting), please use the 'args' parameter instead of 'cmd' to avoid parsing/quoting issues.\n"+
 				"Output format priority (lowest to highest token cost):\n"+
-				"  1. -o jsonpath=<expr>  — extract only needed fields; use {\"\\t\"}/{\"\\n\"} for whitespace\n"+
-				"     e.g. {.items[*].metadata.name} | {range .items[*]}{.metadata.name} {.status.readyReplicas}/{.status.replicas} {end}\n"+
-				"  2. -l <label> / --field-selector — server-side filtering\n"+
-				"  3. -o json — full object (managedFields & last-applied-configuration auto-stripped)\n"+
-				"  4. default table — overview only",
+				"  1. outputFields parameter — server-side JSON projection (recommended for JSON output to save tokens)\n"+
+				"  2. -o jsonpath=<expr>  — extract only needed fields; use {\"\\t\"}/{\"\\n\"} for whitespace\n"+
+				"  3. -l <label> / --field-selector — server-side filtering\n"+
+				"  4. -o json — full object (managedFields & last-applied-configuration auto-stripped)\n"+
+				"  5. default table — overview only",
 		),
 		mcp.WithTitleAnnotation("Execute Kubectl Command"),
 		mcp.WithDestructiveHintAnnotation(true),
@@ -35,6 +37,10 @@ func KubectlTool() mcp.Tool {
 		mcp.WithString("cmd", mcp.Description("要执行的 kubectl 命令字符串，例如 'get pods -n default'。不支持管道和外部命令。/ The kubectl command string to execute, e.g., 'get pods -n default'. Pipes and external commands are not supported.")),
 		mcp.WithArray("args",
 			mcp.Description("参数列表（可选，如果指定了 cmd，则优先使用 cmd 并解析） / The arguments list (optional)"),
+			mcp.Items(map[string]interface{}{"type": "string"}),
+		),
+		mcp.WithArray("outputFields",
+			mcp.Description("JSON字段投影列表（可选，仅对 get -o json 有效）。例如：['.metadata.name', '.spec.priority'] / JSON fields projection list (optional, only valid for get -o json), e.g. ['.metadata.name', '.spec.priority']"),
 			mcp.Items(map[string]interface{}{"type": "string"}),
 		),
 		mcp.WithNumber("page", mcp.Description("页码，仅在执行 get 命令列出资源时有效，从1开始（默认1）/ Page number, only valid for get commands, starting from 1 (default 1)")),
@@ -62,6 +68,10 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		return nil, err
 	}
 
+	// 1. 设置 30s 默认超时，并遵守更短的 deadline
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	// 查找系统 PATH 中的 kubectl 可执行文件
 	kubectlPath, err := exec.LookPath("kubectl")
 	if err != nil {
@@ -72,7 +82,11 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 	var args []string
 	cmdStr := request.GetString("cmd", "")
 	if cmdStr != "" {
-		args = parseCommandLine(cmdStr)
+		parsedArgs, err := parseCommandLine(cmdStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse cmd: %w", err)
+		}
+		args = parsedArgs
 	} else {
 		args = request.GetStringSlice("args", []string{})
 	}
@@ -106,18 +120,48 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		)
 	}
 
+	// 2. 初始化分类器
+	parsedCmd := parseKubectlArgs(args)
+
 	// 检查仅允许只读操作的限制
-	subcmd := strings.ToLower(args[0])
+	subcmd := parsedCmd.Subcommand
 	if subcmd == "rollout" {
-		if len(args) < 2 {
+		if len(parsedCmd.SubArgs) < 1 {
 			return nil, fmt.Errorf("rollout command requires subcommands status or history")
 		}
-		nextSub := strings.ToLower(args[1])
+		nextSub := strings.ToLower(parsedCmd.SubArgs[0])
 		if nextSub != "status" && nextSub != "history" {
-			return nil, fmt.Errorf("only read-only rollout commands (status, history) are allowed, '%s' is rejected", args[1])
+			return nil, fmt.Errorf("only read-only rollout commands (status, history) are allowed, '%s' is rejected", nextSub)
 		}
 	} else if !allowedSubcommands[subcmd] {
 		return nil, fmt.Errorf("only read-only commands (get, describe, logs, top, etc.) are allowed, command '%s' is rejected", args[0])
+	}
+
+	// 3. 拒绝长连接参数
+	if parsedCmd.IsWatchLike {
+		return nil, fmt.Errorf("streaming or watch commands (-w, --watch, -f, --follow) are not supported by the synchronous kubectl MCP tool")
+	}
+
+	// 4. 针对 rollout status，若未指定超时则自动补 --timeout=25s
+	if subcmd == "rollout" && len(parsedCmd.SubArgs) > 0 && strings.ToLower(parsedCmd.SubArgs[0]) == "status" {
+		hasTimeout := false
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "--timeout") {
+				hasTimeout = true
+				break
+			}
+		}
+		if !hasTimeout {
+			args = append(args, "--timeout=25s")
+		}
+	}
+
+	// 5. 支持 outputFields 字段投影
+	outputFields := request.GetStringSlice("outputFields", []string{})
+	if len(outputFields) > 0 && parsedCmd.OutputMode != OutputJSON {
+		// 自动追加 -o json 输出格式
+		args = append(args, "-o", "json")
+		parsedCmd.OutputMode = OutputJSON
 	}
 
 	// 获取集群配置实例
@@ -145,7 +189,7 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 
 	result := string(output)
 
-	// 如果是 get 命令，应用分页处理
+	// 6. 输出结果格式化与分页处理
 	if subcmd == "get" {
 		pageVal := request.GetInt("page", 1)
 		pageSizeVal := request.GetInt("pageSize", 100)
@@ -159,35 +203,36 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 			pageSizeVal = 500
 		}
 
-		if isJSONOutput(args) {
+		if parsedCmd.OutputMode == OutputJSON {
+			// 剥离 JSON 噪音
+			result = stripJSONNoise(result)
+			// 服务端投影过滤
+			if len(outputFields) > 0 {
+				projected, err := projectJSON([]byte(result), outputFields)
+				if err == nil {
+					result = string(projected)
+				}
+			}
+			// 分页切片
 			result = processJSONOutput(result, pageVal, pageSizeVal)
-		} else if !isCustomFormatting(args) {
+		} else if parsedCmd.OutputMode == OutputTable {
 			hasHeader := !hasNoHeadersFlag(args)
 			result = paginateTable(result, pageVal, pageSizeVal, hasHeader)
-		} else if isNameOutput(args) {
+		} else if parsedCmd.OutputMode == OutputName {
 			result = paginateTable(result, pageVal, pageSizeVal, false)
 		}
-	} else if isJSONOutput(args) {
-		// 非 get 命令但输出 json，只做噪音剥离
+	} else if parsedCmd.OutputMode == OutputJSON {
+		// 非 get 命令但输出 json，只做噪音剥离和可选投影
 		result = stripJSONNoise(result)
+		if len(outputFields) > 0 {
+			projected, err := projectJSON([]byte(result), outputFields)
+			if err == nil {
+				result = string(projected)
+			}
+		}
 	}
 
 	return tools.TextResult(result, meta)
-}
-
-// isJSONOutput 检查参数列表中是否包含 -o json 或 --output json 或 --output=json
-func isJSONOutput(args []string) bool {
-	for i, arg := range args {
-		switch {
-		case arg == "-o" || arg == "--output":
-			if i+1 < len(args) && args[i+1] == "json" {
-				return true
-			}
-		case arg == "-o=json" || arg == "--output=json":
-			return true
-		}
-	}
-	return false
 }
 
 // stripJSONNoise 从 kubectl -o json 的输出中剥离对 LLM 无价值的高噪音字段：
@@ -327,7 +372,7 @@ func detectShellOperator(args []string) (string, bool) {
 // - 单引号内：所有字符（包括 \）逐字保留，直到下一个单引号
 // - 双引号内：仅 \"、\\、\$、\` 有转义含义，其余 \ 原样保留
 // - 引号外：\ 转义紧随其后的单个字符（含空格）
-func parseCommandLine(cmd string) []string {
+func parseCommandLine(cmd string) ([]string, error) {
 	var args []string
 	var current strings.Builder
 	inDoubleQuotes := false
@@ -387,10 +432,13 @@ func parseCommandLine(cmd string) []string {
 			current.WriteByte(r)
 		}
 	}
+	if inSingleQuotes || inDoubleQuotes {
+		return nil, fmt.Errorf("unclosed quote in command line")
+	}
 	if current.Len() > 0 {
 		args = append(args, current.String())
 	}
-	return args
+	return args, nil
 }
 
 // processJSONOutput 对 JSON 结果进行噪音剥离和分页切片处理
@@ -482,42 +530,6 @@ func paginateTable(raw string, page, pageSize int, hasHeader bool) string {
 	return strings.Join(resultLines, "\n")
 }
 
-// isCustomFormatting 检查是否使用了 yaml, jsonpath, go-template 等自定义输出格式（需要排除在表格分页之外）
-func isCustomFormatting(args []string) bool {
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "-o=") || strings.HasPrefix(arg, "--output=") {
-			val := strings.SplitN(arg, "=", 2)[1]
-			if val == "yaml" || strings.HasPrefix(val, "jsonpath") || strings.HasPrefix(val, "go-template") {
-				return true
-			}
-		}
-		if arg == "-o" || arg == "--output" {
-			if i+1 < len(args) {
-				val := args[i+1]
-				if val == "yaml" || strings.HasPrefix(val, "jsonpath") || strings.HasPrefix(val, "go-template") {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// isNameOutput 检查是否使用了 -o name 格式
-func isNameOutput(args []string) bool {
-	for i, arg := range args {
-		switch {
-		case arg == "-o" || arg == "--output":
-			if i+1 < len(args) && args[i+1] == "name" {
-				return true
-			}
-		case arg == "-o=name" || arg == "--output=name":
-			return true
-		}
-	}
-	return false
-}
-
 // hasNoHeadersFlag 检查是否传入了 --no-headers 参数
 func hasNoHeadersFlag(args []string) bool {
 	for _, arg := range args {
@@ -526,4 +538,175 @@ func hasNoHeadersFlag(args []string) bool {
 		}
 	}
 	return false
+}
+
+// OutputMode 定义 kubectl 的输出格式模式
+type OutputMode string
+
+const (
+	OutputTable         OutputMode = "table"
+	OutputName          OutputMode = "name"
+	OutputJSON          OutputMode = "json"
+	OutputYAML          OutputMode = "yaml"
+	OutputJSONPath      OutputMode = "jsonpath"
+	OutputCustomColumns OutputMode = "custom-columns"
+	OutputGoTemplate    OutputMode = "go-template"
+)
+
+// ParsedKubectl 结构化解析后的 kubectl 命令信息
+type ParsedKubectl struct {
+	Subcommand  string
+	SubArgs     []string
+	OutputMode  OutputMode
+	IsWatchLike bool
+}
+
+// parseKubectlArgs 将参数列表解析为结构化的命令描述
+func parseKubectlArgs(args []string) *ParsedKubectl {
+	parsed := &ParsedKubectl{
+		OutputMode: OutputTable,
+	}
+
+	if len(args) > 0 {
+		parsed.Subcommand = strings.ToLower(args[0])
+		parsed.SubArgs = args[1:]
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// 检查长连接模式（watch/follow）
+		if arg == "-w" || arg == "--watch" || arg == "-f" || arg == "--follow" {
+			parsed.IsWatchLike = true
+		}
+
+		// 识别输出格式
+		if arg == "-o" || arg == "--output" {
+			if i+1 < len(args) {
+				parsed.OutputMode = parseOutputModeStr(args[i+1])
+			}
+		} else if strings.HasPrefix(arg, "-o=") {
+			parsed.OutputMode = parseOutputModeStr(strings.TrimPrefix(arg, "-o="))
+		} else if strings.HasPrefix(arg, "--output=") {
+			parsed.OutputMode = parseOutputModeStr(strings.TrimPrefix(arg, "--output="))
+		}
+	}
+
+	return parsed
+}
+
+func parseOutputModeStr(val string) OutputMode {
+	// 去掉具体表达式的前缀，例如 jsonpath={...} -> jsonpath
+	val = strings.SplitN(val, "=", 2)[0]
+	switch val {
+	case "json":
+		return OutputJSON
+	case "yaml":
+		return OutputYAML
+	case "name":
+		return OutputName
+	case "jsonpath", "jsonpath-as-json":
+		return OutputJSONPath
+	case "custom-columns", "custom-columns-file":
+		return OutputCustomColumns
+	case "go-template", "go-template-file":
+		return OutputGoTemplate
+	default:
+		return OutputTable
+	}
+}
+
+// projectJSON 对 JSON 数据进行字段投影提取
+func projectJSON(raw []byte, fields []string) ([]byte, error) {
+	var data interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, err
+	}
+
+	projected := projectValue(data, fields)
+	return json.MarshalIndent(projected, "", "    ")
+}
+
+func projectValue(val interface{}, fields []string) interface{} {
+	if len(fields) == 0 {
+		return val
+	}
+
+	if m, ok := val.(map[string]interface{}); ok {
+		// 如果是 Kubernetes 资源列表 (List 类型资源)
+		if items, ok := m["items"].([]interface{}); ok {
+			projectedItems := make([]interface{}, len(items))
+			for i, item := range items {
+				projectedItems[i] = projectSingleObject(item, fields)
+			}
+
+			// 组装并保留基本的 List 元信息
+			res := make(map[string]interface{})
+			for k, v := range m {
+				if k != "items" {
+					res[k] = v
+				}
+			}
+			res["items"] = projectedItems
+			return res
+		}
+		return projectSingleObject(m, fields)
+	}
+	return val
+}
+
+func projectSingleObject(obj interface{}, fields []string) interface{} {
+	m, ok := obj.(map[string]interface{})
+	if !ok {
+		return obj
+	}
+
+	result := make(map[string]interface{})
+	for _, field := range fields {
+		// 移除前导点号
+		path := strings.TrimPrefix(field, ".")
+		parts := strings.Split(path, ".")
+
+		val, found := getValueByPath(m, parts)
+		if found {
+			setNestedValue(result, parts, val)
+		}
+	}
+	return result
+}
+
+func getValueByPath(obj map[string]interface{}, parts []string) (interface{}, bool) {
+	var current interface{} = obj
+	for _, part := range parts {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		val, found := m[part]
+		if !found {
+			return nil, false
+		}
+		current = val
+	}
+	return current, true
+}
+
+func setNestedValue(obj map[string]interface{}, parts []string, val interface{}) {
+	current := obj
+	for i := 0; i < len(parts)-1; i++ {
+		part := parts[i]
+		next, exists := current[part]
+		if !exists {
+			nextMap := make(map[string]interface{})
+			current[part] = nextMap
+			current = nextMap
+		} else if nextMap, ok := next.(map[string]interface{}); ok {
+			current = nextMap
+		} else {
+			nextMap := make(map[string]interface{})
+			current[part] = nextMap
+			current = nextMap
+		}
+	}
+	current[parts[len(parts)-1]] = val
 }

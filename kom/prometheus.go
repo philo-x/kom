@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/prometheus/common/model"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/rest"
@@ -217,7 +219,7 @@ func (c *PromClient) api() (promv1.API, error) {
 		roundTripper = tr
 	}
 
-	// 3. 无论是否是代理模式，只要是在集群上下文中且能够解析出 namespace/service，都应该尝试注入 Token
+	// 3. 无论是否是代理模式，只要是在集群上下文中且能够解析出 namespace/service，都应该尝试注入认证信息
 	if c.service != nil && c.service.kubectl != nil {
 		ctx := c.service.kubectl.Statement.Context
 		if ctx == nil {
@@ -232,13 +234,25 @@ func (c *PromClient) api() (promv1.API, error) {
 		}
 
 		if promNs != "" && promSvc != "" {
-			token, err := c.service.getServiceAccountToken(ctx, promNs, promSvc)
-			if err != nil {
-				klog.Errorf("Failed to get ServiceAccount token for prometheus service %s/%s: %v", promNs, promSvc, err)
-			} else if token != "" {
-				roundTripper = &tokenRoundTripper{
-					token: token,
-					rt:    roundTripper,
+			// 3.1. 优先获取 Basic Auth 凭证进行注入
+			username, password, err := c.service.getBasicAuthCredentials(ctx, promNs)
+			if err == nil && username != "" && password != "" {
+				klog.Infof("Using Basic Auth from secret for prometheus query in namespace %s", promNs)
+				roundTripper = &basicAuthRoundTripper{
+					username: username,
+					password: password,
+					rt:       roundTripper,
+				}
+			} else {
+				// 3.2. 如果没有 Basic Auth 凭证，退回到 ServiceAccount Token 注入
+				token, err := c.service.getServiceAccountToken(ctx, promNs, promSvc)
+				if err != nil {
+					klog.Errorf("Failed to get ServiceAccount token for prometheus service %s/%s: %v", promNs, promSvc, err)
+				} else if token != "" {
+					roundTripper = &tokenRoundTripper{
+						token: token,
+						rt:    roundTripper,
+					}
 				}
 			}
 		}
@@ -403,7 +417,7 @@ func (s *PrometheusService) resolveAddress(namespace, svcName string) string {
 		ctx = s.kubectl.Statement.Context
 	}
 
-	// 根据指定的命名空间和服务名称查找 Prometheus Service
+	// 1. 优先根据指定的命名空间和服务名称查找 Prometheus Service 并构造集群内访问地址
 	var svc v1.Service
 	err := s.kubectl.newInstance().WithContext(ctx).
 		Resource(&v1.Service{}).
@@ -411,20 +425,95 @@ func (s *PrometheusService) resolveAddress(namespace, svcName string) string {
 		Name(svcName).
 		Get(&svc).Error
 
-	if err != nil || svc.Name == "" {
+	if err == nil && svc.Name != "" {
+		port := s.findPrometheusPort(&svc)
+		if port > 0 {
+			scheme := s.getScheme(&svc, port)
+			klog.Infof("Resolved internal Prometheus address via Service: %s://%s.%s.svc:%d", scheme, svc.Name, svc.Namespace, port)
+			// 格式：scheme://service-name.namespace.svc:port
+			return fmt.Sprintf("%s://%s.%s.svc:%d", scheme, svc.Name, svc.Namespace, port)
+		}
+	}
+
+	// 2. 降级：尝试获取外部 Ingress 访问地址
+	extAddr := s.resolveExternalAddress(ctx, namespace, svcName)
+	if extAddr != "" {
+		klog.Infof("Resolved external Prometheus address via Ingress: %s", extAddr)
+		return extAddr
+	}
+
+	return ""
+}
+
+// resolveExternalAddress 尝试在指定的命名空间下寻找 Prometheus 相关的 Ingress 地址并拼接
+func (s *PrometheusService) resolveExternalAddress(ctx context.Context, namespace, svcName string) string {
+	clientset := s.kubectl.Client()
+	if clientset == nil {
+		return ""
+	}
+	// 查找 Ingress 列表
+	var ingresses *networkingv1.IngressList
+	var err error
+	ingresses, err = clientset.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
 		return ""
 	}
 
-	// 找到 Service，构造集群内访问地址
-	port := s.findPrometheusPort(&svc)
-	if port <= 0 {
-		return ""
+	// 寻找最匹配的 Ingress
+	for _, ing := range ingresses.Items {
+		// 检查 Ingress 是否指向我们的 Service
+		for _, rule := range ing.Spec.Rules {
+			if rule.HTTP == nil {
+				continue
+			}
+			for _, path := range rule.HTTP.Paths {
+				if path.Backend.Service != nil && path.Backend.Service.Name == svcName {
+					// 找到匹配的 Ingress!
+					host := rule.Host
+					if host == "" {
+						// 尝试从 Status.LoadBalancer 中获取 IP/Hostname
+						if len(ing.Status.LoadBalancer.Ingress) > 0 {
+							host = ing.Status.LoadBalancer.Ingress[0].IP
+							if host == "" {
+								host = ing.Status.LoadBalancer.Ingress[0].Hostname
+							}
+						}
+					}
+
+					// 如果还是没有 host，使用 restConfig 的 Host IP
+					if host == "" {
+						restConfig := s.kubectl.RestConfig()
+						if restConfig != nil && restConfig.Host != "" {
+							u, err := url.Parse(restConfig.Host)
+							if err == nil {
+								host = u.Host
+							} else {
+								host = restConfig.Host
+							}
+						}
+					}
+
+					if host == "" {
+						continue
+					}
+
+					// 确保 host 包含 http/https
+					scheme := "http"
+					if len(ing.Spec.TLS) > 0 {
+						scheme = "https"
+					}
+
+					if !strings.Contains(host, "://") {
+						host = fmt.Sprintf("%s://%s", scheme, host)
+					}
+
+					pathStr := path.Path
+					return fmt.Sprintf("%s%s", strings.TrimSuffix(host, "/"), pathStr)
+				}
+			}
+		}
 	}
-
-	scheme := s.getScheme(&svc, port)
-
-	// 格式：scheme://service-name.namespace.svc:port
-	return fmt.Sprintf("%s://%s.%s.svc:%d", scheme, svc.Name, svc.Namespace, port)
+	return ""
 }
 
 // getScheme 根据 Service 端口属性判断使用 http 还是 https 协议。
@@ -668,4 +757,65 @@ func (q *PromQuery) QueryMatrix() ([]Series, error) {
 		return nil, err
 	}
 	return res.AsMatrix(), nil
+}
+
+type basicAuthRoundTripper struct {
+	username string
+	password string
+	rt       http.RoundTripper
+}
+
+func (b *basicAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	reqClone := new(http.Request)
+	*reqClone = *req
+	reqClone.Header = make(http.Header, len(req.Header))
+	for k, s := range req.Header {
+		reqClone.Header[k] = append([]string(nil), s...)
+	}
+	reqClone.SetBasicAuth(b.username, b.password)
+	return b.rt.RoundTrip(reqClone)
+}
+
+// getBasicAuthCredentials 尝试在指定的命名空间下寻找 Prometheus 相关的 Basic Auth 密文并提取账号密码
+func (s *PrometheusService) getBasicAuthCredentials(ctx context.Context, namespace string) (string, string, error) {
+	clientset := s.kubectl.Client()
+	if clientset == nil {
+		return "", "", fmt.Errorf("failed to get kubernetes clientset")
+	}
+
+	// 查找该命名空间下的所有 secrets
+	secrets, err := clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", "", err
+	}
+
+	// 寻找最匹配的 basic-auth secret
+	var targetSecret *v1.Secret
+	for _, sec := range secrets.Items {
+		name := strings.ToLower(sec.Name)
+		// 寻找包含 prometheus 或 thanos 且包含 basic-auth 的 secret
+		if (strings.Contains(name, "prometheus") || strings.Contains(name, "thanos")) && strings.Contains(name, "basic-auth") {
+			targetSecret = &sec
+			break
+		}
+	}
+
+	if targetSecret == nil {
+		return "", "", fmt.Errorf("no prometheus basic-auth secret found")
+	}
+
+	// 从 secret 中提取 username 和 password
+	usernameBytes, hasUser := targetSecret.Data["username"]
+	passwordBytes, hasPass := targetSecret.Data["password"]
+	if !hasUser || !hasPass {
+		// 尝试其它的 key
+		usernameBytes, hasUser = targetSecret.Data["user"]
+		passwordBytes, hasPass = targetSecret.Data["pass"]
+	}
+
+	if !hasUser || !hasPass {
+		return "", "", fmt.Errorf("username or password not found in secret %s", targetSecret.Name)
+	}
+
+	return string(usernameBytes), string(passwordBytes), nil
 }

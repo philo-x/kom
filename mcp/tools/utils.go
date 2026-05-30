@@ -106,16 +106,11 @@ func ParseFromRequest(ctx context.Context, request mcp.CallToolRequest) (context
 		Kind:      kind,
 	}
 
-	// 如果只有一个集群的时候，使用空，默认集群
-	// 如果大于一个集群，没有传值，那么要返回错误
-	if len(kom.Clusters().AllClusters()) > 1 && meta.Cluster == "" {
+	// 强制要求必须传入 cluster 参数，且该集群必须存在
+	if meta.Cluster == "" {
 		return nil, nil, fmt.Errorf("cluster is required, 集群名称必须设置")
 	}
-	if len(kom.Clusters().AllClusters()) == 1 && meta.Cluster == "" {
-		meta.Cluster = kom.Clusters().DefaultCluster().ID
-		return newCtx, meta, nil
-	}
-	if meta.Cluster != "" && kom.Clusters().GetClusterById(meta.Cluster) == nil {
+	if kom.Clusters().GetClusterById(meta.Cluster) == nil {
 		return nil, nil, fmt.Errorf("cluster %s not found 集群不存在，请检查集群名称", meta.Cluster)
 	}
 	return newCtx, meta, nil
