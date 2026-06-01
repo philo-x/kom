@@ -178,8 +178,8 @@ func ParsePagination(request mcp.CallToolRequest) (page, pageSize, offset int) {
 	if pageSize < 1 {
 		pageSize = 10
 	}
-	if pageSize > 500 {
-		pageSize = 500
+	if pageSize > 300 {
+		pageSize = 300
 	}
 	offset = (page - 1) * pageSize
 	return

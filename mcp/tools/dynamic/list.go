@@ -24,7 +24,7 @@ func ListDynamicResource() mcp.Tool {
 		mcp.WithString("labelSelector", mcp.Description("用于过滤资源的标签选择器（例如：app=k8m）/ Label selector to filter resources (e.g. app=k8m)")),
 		mcp.WithString("fieldSelector", mcp.Description("用于过滤资源的字段选择器（例如：metadata.name=test-deploy）/ Field selector to filter resources (e.g. metadata.name=test-deploy)")),
 		mcp.WithNumber("page", mcp.Description("页码，从1开始（默认1）/ Page number, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大500）/ Number of resources per page (default 10, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大300）/ Number of resources per page (default 10, max 300)")),
 	)
 }
 

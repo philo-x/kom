@@ -13,7 +13,8 @@ func RegisterDenyMutationCallbacks(c *kom.ClusterInst) func() {
 
 	k := c.Kubectl
 	_ = k.Callback().Delete().Before("kom:delete").Register("security:deny-delete", denyAction("delete"))
-	_ = k.Callback().Exec().Before("kom:pod:exec").Register("security:deny-exec", denyAction("exec"))
+	// Allow exec operations
+	// _ = k.Callback().Exec().Before("kom:pod:exec").Register("security:deny-exec", denyAction("exec"))
 	_ = k.Callback().Patch().Before("kom:patch").Register("security:deny-patch", denyAction("patch"))
 	_ = k.Callback().Update().Before("kom:update").Register("security:deny-update", denyAction("update"))
 

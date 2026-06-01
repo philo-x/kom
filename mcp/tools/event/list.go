@@ -22,7 +22,7 @@ func ListEventResource() mcp.Tool {
 		mcp.WithString("involvedObjectName", mcp.Description("按涉及对象名称过滤事件 / Filter events by involved object name")),
 		mcp.WithString("involvedObjectKind", mcp.Description("按涉及对象类型过滤事件 (如 Pod, Deployment, Node) / Filter events by involved object kind (e.g. Pod, Deployment, Node)")),
 		mcp.WithNumber("page", mcp.Description("页码，从1开始（默认1）/ Page number, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大500）/ Number of resources per page (default 10, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大300）/ Number of resources per page (default 10, max 300)")),
 	)
 }
 

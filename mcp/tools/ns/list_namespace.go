@@ -19,7 +19,7 @@ func ListNamespace() mcp.Tool {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行资源的集群/Cluster where the resources are running")),
 		mcp.WithNumber("page", mcp.Description("页码，从1开始（默认1）/ Page number, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大500）/ Number of resources per page (default 10, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大300）/ Number of resources per page (default 10, max 300)")),
 	)
 }
 

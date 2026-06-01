@@ -92,11 +92,22 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	// If it was a network timeout error or refused inside the pod, return it directly
-	if !strings.Contains(err.Error(), "executable file not found") && !strings.Contains(execResult, "not found") {
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+	isExecUnavailable := strings.Contains(errStr, "executable file not found") ||
+		strings.Contains(errStr, "exec is disabled") ||
+		strings.Contains(errStr, "operation denied") ||
+		strings.Contains(errStr, "forbidden") ||
+		strings.Contains(errStr, "unauthorized") ||
+		strings.Contains(execResult, "not found")
+
+	if !isExecUnavailable {
 		return tools.TextResult(fmt.Sprintf("Connection failed inside pod (Command failed):\nError: %v\nOutput: %s", err, execResult), meta)
 	}
 
-	klog.V(2).Infof("Pod %s is missing networking utilities (nc/curl/wget). Spawning a temporary debug Pod...", meta.Name)
+	klog.V(2).Infof("Pod %s is missing networking utilities (nc/curl/wget) or exec is disabled/forbidden. Spawning a temporary debug Pod...", meta.Name)
 
 	// Step 2: Fallback - Spawn a temporary diagnostic pod in the same namespace
 	clientset := kubectl.Client()

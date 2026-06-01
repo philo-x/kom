@@ -37,7 +37,7 @@ func ListALB2ResourcesTool() mcp.Tool {
 		mcp.WithString("cluster", mcp.Required(), mcp.Description("运行 ALB2 的集群名称 / Cluster name")),
 		mcp.WithString("namespace", mcp.Description("ALB2 所在的命名空间 (默认 cpaas-system) / Namespace of ALB2 instances (default: cpaas-system)")),
 		mcp.WithNumber("page", mcp.Description("页码，从1开始（默认1）/ Page number, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大500）/ Number of resources per page (default 10, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大300）/ Number of resources per page (default 10, max 300)")),
 	)
 }
 

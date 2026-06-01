@@ -44,7 +44,7 @@ func KubectlTool() mcp.Tool {
 			mcp.Items(map[string]interface{}{"type": "string"}),
 		),
 		mcp.WithNumber("page", mcp.Description("页码，仅在执行 get 命令列出资源时有效，从1开始（默认1）/ Page number, only valid for get commands, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页行数或资源数，从1开始（默认100，最大500）/ Page size, starting from 1 (default 100, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页行数或资源数，从1开始（默认100，最大300）/ Page size, starting from 1 (default 100, max 300)")),
 	)
 }
 
@@ -199,8 +199,8 @@ func KubectlHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		if pageSizeVal < 1 {
 			pageSizeVal = 100
 		}
-		if pageSizeVal > 500 {
-			pageSizeVal = 500
+		if pageSizeVal > 300 {
+			pageSizeVal = 300
 		}
 
 		if parsedCmd.OutputMode == OutputJSON {

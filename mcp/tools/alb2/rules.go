@@ -47,7 +47,7 @@ func ListALB2RoutingRulesTool() mcp.Tool {
 		mcp.WithString("alb2_name", mcp.Required(), mcp.Description("过滤特定的 ALB2 实例名称 (必填) / Filter by ALB2 name (Required)")),
 		mcp.WithString("frontend_name", mcp.Description("过滤特定的 Frontend 监听器名称，例如 center5-100-115-99-170-00080 / Filter by Frontend name")),
 		mcp.WithNumber("page", mcp.Description("页码，从1开始（默认1）/ Page number, starting from 1 (default 1)")),
-		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大500）/ Number of resources per page (default 10, max 500)")),
+		mcp.WithNumber("pageSize", mcp.Description("每页返回的资源数量（默认10，最大300）/ Number of resources per page (default 10, max 300)")),
 	)
 }
 
