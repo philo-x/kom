@@ -118,7 +118,7 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 			Containers: []corev1.Container{
 				{
 					Name:            "diag",
-					Image:           "busybox:1.36",
+					Image:           "dev-apaas-harbor-app.mis.bcs/ai/busybox:1.36",
 					ImagePullPolicy: corev1.PullIfNotPresent,
 					Command:         []string{"sh", "-c"},
 					Args:            []string{fmt.Sprintf("echo 'Testing connection...' && nc -zv -w %d %s %d 2>&1", timeout, target, port)},
