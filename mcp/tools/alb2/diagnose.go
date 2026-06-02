@@ -3,7 +3,6 @@ package alb2
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
@@ -41,15 +40,17 @@ type DSLXCondition struct {
 type URLPattern = Pattern
 type HostPattern = Pattern
 
+// Dimension represents the routing dimension (matcher type and optional key)
+type Dimension struct {
+	Type string `json:"type"`
+	Key  string `json:"key,omitempty"`
+}
+
 // ruleMatchInfo holds the normalized matching information extracted from a Rule
 type ruleMatchInfo struct {
-	Name               string
-	Priority           int64
-	Conditions         []DSLXCondition
-	URLs               []URLPattern
-	Hosts              []HostPattern
-	HasExtraConditions bool
-	DslxJSON           string
+	Name                  string
+	Priority              int64
+	NormalizedConstraints map[Dimension][]Pattern
 }
 
 // DiagnoseALB2RuleConflictTool defines the tool schema
@@ -305,103 +306,252 @@ func sortConditions(conds []DSLXCondition) {
 
 // extractRuleMatchInfo extracts normalized matching information from a Rule resource
 func extractRuleMatchInfo(rule *unstructured.Unstructured) ruleMatchInfo {
-	conditions := extractDSLXConditions(rule)
-	var urls []URLPattern
-	var hosts []HostPattern
-	var hasExtra bool
-	for _, c := range conditions {
-		if c.Type == "URL" {
-			urls = c.Values
-		} else if c.Type == "HOST" {
-			hosts = c.Values
-		} else {
-			hasExtra = true
-		}
-	}
-	var dslxJSON string
-	dslxSlice, dslxFound, _ := unstructured.NestedSlice(rule.Object, "spec", "dslx")
-	if dslxFound && len(dslxSlice) > 0 {
-		if bytes, err := json.Marshal(dslxSlice); err == nil {
-			dslxJSON = string(bytes)
-		}
-	}
-
 	return ruleMatchInfo{
-		Name:               rule.GetName(),
-		Priority:           getRulePriority(rule),
-		Conditions:         conditions,
-		URLs:               urls,
-		Hosts:              hosts,
-		HasExtraConditions: hasExtra,
-		DslxJSON:           dslxJSON,
+		Name:                  rule.GetName(),
+		Priority:              getRulePriority(rule),
+		NormalizedConstraints: getNormalizedRuleConstraints(rule),
 	}
 }
 
-// dslxConditionsEqual checks whether two lists of DSLXCondition are semantically identical
-func dslxConditionsEqual(a, b []DSLXCondition) bool {
-	if len(a) != len(b) {
+// getNormalizedRuleConstraints returns a normalized map of constraints by dimension.
+// It automatically handles wildcard conditions (which are ignored, meaning no constraint on that dimension).
+func getNormalizedRuleConstraints(rule *unstructured.Unstructured) map[Dimension][]Pattern {
+	conditions := extractDSLXConditions(rule)
+	constraints := make(map[Dimension][]Pattern)
+
+	for _, c := range conditions {
+		dim := Dimension{Type: c.Type, Key: c.Key}
+		if len(c.Values) == 0 {
+			continue
+		}
+
+		var cleanPatterns []Pattern
+		hasWildcard := false
+		for _, p := range c.Values {
+			if isWildcard(dim, p) {
+				hasWildcard = true
+				break
+			}
+			cleanPatterns = append(cleanPatterns, p)
+		}
+
+		if hasWildcard {
+			// A wildcard pattern matches any value, which makes the whole dimension unconstrained (OR logic)
+			continue
+		}
+
+		if len(cleanPatterns) > 0 {
+			// Ensure order-independent comparison later
+			sortPatterns(cleanPatterns)
+			constraints[dim] = cleanPatterns
+		}
+	}
+
+	return constraints
+}
+
+func isWildcard(dim Dimension, p Pattern) bool {
+	if dim.Type == "HOST" {
+		return p.Value == "" || p.Value == "*"
+	}
+	if dim.Type == "URL" {
+		if p.Op == "STARTS_WITH" || p.Op == "REGEX" {
+			return isWildcardURLPath(p.Value)
+		}
 		return false
 	}
-	for i := range a {
-		if a[i].Type != b[i].Type || a[i].Key != b[i].Key {
-			return false
-		}
-		if len(a[i].Values) != len(b[i].Values) {
-			return false
-		}
-		for j := range a[i].Values {
-			if a[i].Values[j].Op != b[i].Values[j].Op || a[i].Values[j].Value != b[i].Values[j].Value {
-				return false
+	return false
+}
+
+func isWildcardURLPath(val string) bool {
+	return val == "" || val == "/" || val == "/*"
+}
+
+func hostPatternCovers(a, b Pattern) bool {
+	dA, sA := normalizeHostPattern(a)
+	dB, sB := normalizeHostPattern(b)
+
+	// If A matches all hosts, it covers B
+	if dA == "" || dA == "*" {
+		return true
+	}
+	// If A restricts host but B matches all hosts, A cannot cover B
+	if dB == "" || dB == "*" {
+		return false
+	}
+
+	if sA {
+		if sB {
+			// B matches subdomains of dB, which are also subdomains of dA.
+			return dB == dA || strings.HasSuffix(dB, "."+dA)
+		} else {
+			// B is exact match.
+			// A is suffix. Check if dB matches subdomain or the domain itself.
+			requiresDot := strings.HasPrefix(a.Value, "*.") || strings.HasPrefix(a.Value, ".")
+			if requiresDot {
+				return dB == dA || strings.HasSuffix(dB, "."+dA)
+			} else {
+				return dB == dA || strings.HasSuffix(dB, "."+dA) || strings.HasSuffix(dB, dA)
 			}
 		}
 	}
-	return true
+
+	// If A is exact match, it only covers B if B is exact match and they are equal.
+	return !sA && !sB && dA == dB
 }
 
-func getRuleURLs(conds []DSLXCondition) []Pattern {
-	for _, c := range conds {
-		if c.Type == "URL" {
-			return c.Values
-		}
-	}
-	return []Pattern{{Op: "STARTS_WITH", Value: "/"}}
-}
-
-func getRuleHosts(conds []DSLXCondition) []Pattern {
-	for _, c := range conds {
-		if c.Type == "HOST" {
-			return c.Values
-		}
-	}
-	return []Pattern{{Op: "EQ", Value: "*"}}
-}
-
-func getRuleExtraConditions(conds []DSLXCondition) []DSLXCondition {
-	var extra []DSLXCondition
-	for _, c := range conds {
-		if c.Type != "URL" && c.Type != "HOST" {
-			extra = append(extra, c)
-		}
-	}
-	return extra
-}
-
-func extraConditionsCover(extraI, extraJ []DSLXCondition) bool {
-	if len(extraI) == 0 {
+func patternCoversPattern(a, b Pattern, dim Dimension) bool {
+	// EXIST covers anything on the same key/dimension
+	if a.Op == "EXIST" {
 		return true
 	}
-	for _, cI := range extraI {
-		found := false
-		for _, cJ := range extraJ {
-			if cI.Type == cJ.Type && cI.Key == cJ.Key {
-				if patternsCover(cI.Values, cJ.Values) {
-					found = true
+
+	// Identical patterns always cover each other
+	if a.Op == b.Op && a.Value == b.Value {
+		return true
+	}
+
+	// Normalize HOST dimension checks
+	if dim.Type == "HOST" {
+		return hostPatternCovers(a, b)
+	}
+
+	// Normalize IP range checks for SRC_IP or when both can be parsed as IP ranges
+	if dim.Type == "SRC_IP" || a.Op == "RANGE" || b.Op == "RANGE" {
+		startA, endA, errA := parseIPRange(a.Value)
+		startB, endB, errB := parseIPRange(b.Value)
+		if errA == nil && errB == nil {
+			sh16 := startA.To16()
+			eh16 := endA.To16()
+			sl16 := startB.To16()
+			el16 := endB.To16()
+			if sh16 != nil && eh16 != nil && sl16 != nil && el16 != nil {
+				return bytes.Compare(sl16, sh16) >= 0 && bytes.Compare(el16, eh16) <= 0
+			}
+		}
+	}
+
+	// For normal string matchers, treat IN and EQ as equivalent
+	opA := a.Op
+	if opA == "IN" {
+		opA = "EQ"
+	}
+	opB := b.Op
+	if opB == "IN" {
+		opB = "EQ"
+	}
+
+	// Exact match
+	if opA == "EQ" && opB == "EQ" {
+		return a.Value == b.Value
+	}
+
+	// Prefix match
+	if opA == "STARTS_WITH" {
+		if opB == "STARTS_WITH" || opB == "EQ" {
+			return strings.HasPrefix(b.Value, a.Value)
+		}
+	}
+
+	// Suffix match
+	if opA == "ENDS_WITH" {
+		if opB == "ENDS_WITH" || opB == "EQ" {
+			return strings.HasSuffix(b.Value, a.Value)
+		}
+	}
+
+	return false
+}
+
+func ruleA_Shadows_ruleB(constraintsA, constraintsB map[Dimension][]Pattern) (shadowType string) {
+	// A covers B if:
+	// For every dimension D in A:
+	//   1. D must be present in B.
+	//   2. For every pattern b in B[D], there must be some pattern a in A[D] that covers b.
+
+	// If A has no constraints at all, it covers B (since A matches everything).
+	if len(constraintsA) == 0 {
+		if len(constraintsB) > 0 {
+			return "WildcardShadowing"
+		}
+		return ""
+	}
+
+	hasSpecificShadow := false
+	hasWildcardShadow := false
+
+	// Track if B restricts any dimension that A does not.
+	// Since A covers B (which we verify below), the omission of this dimension in A
+	// acts as an implicit wildcard that shadows B's specific dimension.
+	for dimB := range constraintsB {
+		if _, exists := constraintsA[dimB]; !exists {
+			hasWildcardShadow = true
+			break
+		}
+	}
+
+	for dimA, patternsA := range constraintsA {
+		patternsB, exists := constraintsB[dimA]
+		if !exists {
+			// B does not constrain this dimension. Since A restricts it, A cannot cover B.
+			return ""
+		}
+
+		// Check if patternsA covers patternsB
+		for _, b := range patternsB {
+			covered := false
+			for _, a := range patternsA {
+				if patternCoversPattern(a, b, dimA) {
+					covered = true
+					// Check the type of shadowing
+					if a.Op == "STARTS_WITH" && b.Op == "STARTS_WITH" && a.Value != b.Value {
+						hasSpecificShadow = true
+					} else if dimA.Type == "URL" && isWildcardURLPath(a.Value) && !isWildcardURLPath(b.Value) {
+						hasWildcardShadow = true
+					} else if a.Op == "EXIST" && b.Op != "EXIST" {
+						hasWildcardShadow = true // Existential covers specific value (e.g. cookie exist shadows cookie=val)
+					} else if a.Op == "ENDS_WITH" && b.Op == "ENDS_WITH" && a.Value != b.Value {
+						hasSpecificShadow = true
+					} else if a.Op == "RANGE" && b.Op != "RANGE" {
+						hasWildcardShadow = true // IP range covers specific IP
+					} else if a.Op == "IN" && b.Op != "IN" {
+						hasWildcardShadow = true // Set containing values covers specific value
+					}
 					break
 				}
 			}
+			if !covered {
+				return ""
+			}
 		}
-		if !found {
+	}
+
+	// If we got here, A covers B.
+	if hasWildcardShadow {
+		return "WildcardShadowing"
+	}
+	if hasSpecificShadow {
+		return "PrefixShadowing"
+	}
+	return "PrefixShadowing" // Default fallback for shadowing warning
+}
+
+func constraintsEqual(cA, cB map[Dimension][]Pattern) bool {
+	if len(cA) != len(cB) {
+		return false
+	}
+	for dimA, patternsA := range cA {
+		patternsB, exists := cB[dimA]
+		if !exists {
 			return false
+		}
+		if len(patternsA) != len(patternsB) {
+			return false
+		}
+		for i := range patternsA {
+			if patternsA[i].Op != patternsB[i].Op || patternsA[i].Value != patternsB[i].Value {
+				return false
+			}
 		}
 	}
 	return true
@@ -434,67 +584,6 @@ func parseIPRange(s string) (net.IP, net.IP, error) {
 	return nil, nil, fmt.Errorf("invalid IP range: %s", s)
 }
 
-func ipRangeCovers(rangeStr, valStr string) bool {
-	startHigh, endHigh, err := parseIPRange(rangeStr)
-	if err != nil {
-		return false
-	}
-	startLow, endLow, err := parseIPRange(valStr)
-	if err != nil {
-		return false
-	}
-	sh16 := startHigh.To16()
-	eh16 := endHigh.To16()
-	sl16 := startLow.To16()
-	el16 := endLow.To16()
-	if sh16 == nil || eh16 == nil || sl16 == nil || el16 == nil {
-		return false
-	}
-	return bytes.Compare(sl16, sh16) >= 0 && bytes.Compare(el16, eh16) <= 0
-}
-
-func patternCoversPattern(pi, pj Pattern) bool {
-	if pi.Op == "EXIST" {
-		return true
-	}
-	if pi.Op == pj.Op && pi.Value == pj.Value {
-		return true
-	}
-	if pi.Op == "IN" && pj.Op == "EQ" && pi.Value == pj.Value {
-		return true
-	}
-	if (pi.Op == "EQ" || pi.Op == "RANGE") && (pj.Op == "EQ" || pj.Op == "RANGE") {
-		startHigh, endHigh, errHigh := parseIPRange(pi.Value)
-		startLow, endLow, errLow := parseIPRange(pj.Value)
-		if errHigh == nil && errLow == nil {
-			sh16 := startHigh.To16()
-			eh16 := endHigh.To16()
-			sl16 := startLow.To16()
-			el16 := endLow.To16()
-			if sh16 != nil && eh16 != nil && sl16 != nil && el16 != nil {
-				return bytes.Compare(sl16, sh16) >= 0 && bytes.Compare(el16, eh16) <= 0
-			}
-		}
-	}
-	return false
-}
-
-func patternsCover(pI, pJ []Pattern) bool {
-	for _, pj := range pJ {
-		matched := false
-		for _, pi := range pI {
-			if patternCoversPattern(pi, pj) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-	return true
-}
-
 func normalizeHostPattern(hp Pattern) (domain string, isSuffix bool) {
 	val := hp.Value
 	if hp.Op == "ENDS_WITH" || strings.HasPrefix(val, "*.") || strings.HasPrefix(val, ".") {
@@ -504,50 +593,6 @@ func normalizeHostPattern(hp Pattern) (domain string, isSuffix bool) {
 		return val, true
 	}
 	return val, false
-}
-
-func hostPatternsOverlap(h1, h2 Pattern) bool {
-	d1, s1 := normalizeHostPattern(h1)
-	d2, s2 := normalizeHostPattern(h2)
-
-	if d1 == "" || d1 == "*" || d2 == "" || d2 == "*" {
-		return true
-	}
-
-	if s1 && s2 {
-		return d1 == d2 || strings.HasSuffix(d1, "."+d2) || strings.HasSuffix(d2, "."+d1)
-	}
-	if !s1 && !s2 {
-		return d1 == d2
-	}
-	if s1 {
-		return d2 == d1 || strings.HasSuffix(d2, "."+d1)
-	} else {
-		return d1 == d2 || strings.HasSuffix(d1, "."+d2)
-	}
-}
-
-func hostPatternShadows(h1, h2 Pattern) bool {
-	d1, s1 := normalizeHostPattern(h1)
-	d2, s2 := normalizeHostPattern(h2)
-
-	if d1 == "" || d1 == "*" {
-		return d2 != "" && d2 != "*"
-	}
-
-	if s1 {
-		if s2 {
-			return d1 != d2 && strings.HasSuffix(d2, "."+d1)
-		} else {
-			requiresDot := strings.HasPrefix(h1.Value, "*.") || strings.HasPrefix(h1.Value, ".")
-			if requiresDot {
-				return strings.HasSuffix(d2, "."+d1)
-			} else {
-				return d2 == d1 || strings.HasSuffix(d2, "."+d1) || strings.HasSuffix(d2, d1)
-			}
-		}
-	}
-	return false
 }
 
 func hostsEquivalent(h1, h2 Pattern) bool {
@@ -560,160 +605,27 @@ func hostsEquivalent(h1, h2 Pattern) bool {
 	return d1 == d2 && s1 == s2
 }
 
-func domainsOverlap(hostsA, hostsB []Pattern) bool {
-	if len(hostsA) == 0 || len(hostsB) == 0 {
-		return true
-	}
-
-	for _, a := range hostsA {
-		for _, b := range hostsB {
-			if hostPatternsOverlap(a, b) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func getEffectiveURLFromConds(conds []DSLXCondition) string {
-	for _, c := range conds {
-		if c.Type == "URL" && len(c.Values) > 0 {
-			return c.Values[0].Value
-		}
-	}
-	return ""
-}
-
-func isWildcardURL(url Pattern) bool {
-	return url.Value == "" || url.Value == "/" || (url.Op == "STARTS_WITH" && url.Value == "/")
-}
-
-func urlShadowsURL(urlA, urlB Pattern) (shadowType string) {
-	if isWildcardURL(urlA) && !isWildcardURL(urlB) {
-		return "WildcardShadowing"
-	}
-
-	if urlA.Op == "REGEX" || urlB.Op == "REGEX" {
-		return ""
-	}
-
-	if urlA.Op == "STARTS_WITH" && urlA.Value != "" && urlB.Value != "" {
-		valA := urlA.Value
-		valB := urlB.Value
-		if strings.HasPrefix(valB, valA) && valA != valB {
-			return "PrefixShadowing"
-		}
-	}
-
-	return ""
-}
-
-func urlPatternsCover(urlsI, urlsJ []Pattern) (shadowType string) {
-	isIdentical := true
-	for _, uj := range urlsJ {
-		matched := false
-		var currentShadowType string
-		for _, ui := range urlsI {
-			if ui.Op == uj.Op && ui.Value == uj.Value {
-				matched = true
-				break
-			}
-			st := urlShadowsURL(ui, uj)
-			if st != "" {
-				matched = true
-				currentShadowType = st
-				isIdentical = false
-				break
-			}
-		}
-		if !matched {
-			return ""
-		}
-		if shadowType == "" && currentShadowType != "" {
-			shadowType = currentShadowType
-		}
-	}
-	if isIdentical {
-		return "PrefixShadowing"
-	}
-	if shadowType == "" {
-		return "PrefixShadowing"
-	}
-	return shadowType
-}
-
-func ruleShadowsRule(infoI, infoJ ruleMatchInfo) (shadowType string) {
-	hostsI := getRuleHosts(infoI.Conditions)
-	hostsJ := getRuleHosts(infoJ.Conditions)
-	if !domainsOverlap(hostsI, hostsJ) {
-		return ""
-	}
-
-	hostShadows := false
-	for _, hj := range hostsJ {
-		matched := false
-		for _, hi := range hostsI {
-			if hi.Op == hj.Op && hi.Value == hj.Value {
-				matched = true
-				break
-			}
-			if hostPatternShadows(hi, hj) {
-				matched = true
-				hostShadows = true
-				break
-			}
-		}
-		if !matched {
-			return ""
-		}
-	}
-
-	urlsI := getRuleURLs(infoI.Conditions)
-	urlsJ := getRuleURLs(infoJ.Conditions)
-	urlShadowType := urlPatternsCover(urlsI, urlsJ)
-	if urlShadowType == "" {
-		return ""
-	}
-
-	extraI := getRuleExtraConditions(infoI.Conditions)
-	extraJ := getRuleExtraConditions(infoJ.Conditions)
-	if !extraConditionsCover(extraI, extraJ) {
-		return ""
-	}
-
-	if dslxConditionsEqual(infoI.Conditions, infoJ.Conditions) {
-		return ""
-	}
-
-	if urlShadowType == "WildcardShadowing" {
-		return "WildcardShadowing"
-	}
-	if hostShadows {
-		return "PrefixShadowing"
-	}
-	return urlShadowType
-}
-
 func buildShadowingMessage(infoHigh, infoLow ruleMatchInfo, shadowType string, samePriority bool) string {
-	urlHigh := getEffectiveURLFromConds(infoHigh.Conditions)
-	if urlHigh == "" {
-		urlHigh = "/"
+	urlDim := Dimension{Type: "URL"}
+	hostDim := Dimension{Type: "HOST"}
+
+	urlHigh := "/"
+	if urls := infoHigh.NormalizedConstraints[urlDim]; len(urls) > 0 {
+		urlHigh = urls[0].Value
 	}
-	urlLow := getEffectiveURLFromConds(infoLow.Conditions)
-	if urlLow == "" {
-		urlLow = "/"
+	urlLow := "/"
+	if urls := infoLow.NormalizedConstraints[urlDim]; len(urls) > 0 {
+		urlLow = urls[0].Value
 	}
 
-	hostsHigh := getRuleHosts(infoHigh.Conditions)
 	displayHostHigh := "*"
-	if len(hostsHigh) > 0 && hostsHigh[0].Value != "" {
-		displayHostHigh = hostsHigh[0].Value
+	if hosts := infoHigh.NormalizedConstraints[hostDim]; len(hosts) > 0 && hosts[0].Value != "" {
+		displayHostHigh = hosts[0].Value
 	}
 
-	hostsLow := getRuleHosts(infoLow.Conditions)
 	displayHostLow := "*"
-	if len(hostsLow) > 0 && hostsLow[0].Value != "" {
-		displayHostLow = hostsLow[0].Value
+	if hosts := infoLow.NormalizedConstraints[hostDim]; len(hosts) > 0 && hosts[0].Value != "" {
+		displayHostLow = hosts[0].Value
 	}
 
 	if samePriority {
@@ -750,12 +662,17 @@ func sortMatchedRules(rules []*unstructured.Unstructured) {
 }
 
 // hasEquivalentHost checks if two rules belong to the same host routing bucket (share equivalent host patterns)
-func hasEquivalentHost(condsI, condsJ []DSLXCondition) bool {
-	hostsI := getRuleHosts(condsI)
-	hostsJ := getRuleHosts(condsJ)
-	for _, hI := range hostsI {
-		for _, hJ := range hostsJ {
-			if hostsEquivalent(hI, hJ) {
+func hasEquivalentHost(cA, cB map[Dimension][]Pattern) bool {
+	hostDim := Dimension{Type: "HOST"}
+	hostsA := cA[hostDim]
+	hostsB := cB[hostDim]
+
+	if len(hostsA) == 0 && len(hostsB) == 0 {
+		return true // Both have wildcard host
+	}
+	for _, a := range hostsA {
+		for _, b := range hostsB {
+			if hostsEquivalent(a, b) {
 				return true
 			}
 		}
@@ -768,10 +685,11 @@ func checkPairConflict(infoI, infoJ ruleMatchInfo) []ConflictWarning {
 	var warnings []ConflictWarning
 
 	// 1. Duplicate matching: same matching semantics
-	if dslxConditionsEqual(infoI.Conditions, infoJ.Conditions) {
-		urlDisplay := getEffectiveURLFromConds(infoI.Conditions)
-		if urlDisplay == "" {
-			urlDisplay = "/"
+	if constraintsEqual(infoI.NormalizedConstraints, infoJ.NormalizedConstraints) {
+		urlDim := Dimension{Type: "URL"}
+		urlDisplay := "/"
+		if urls := infoI.NormalizedConstraints[urlDim]; len(urls) > 0 {
+			urlDisplay = urls[0].Value
 		}
 		var msg string
 		if infoI.Priority < infoJ.Priority {
@@ -794,7 +712,7 @@ func checkPairConflict(infoI, infoJ ruleMatchInfo) []ConflictWarning {
 	// 2. Shadowing check
 	if infoI.Priority < infoJ.Priority {
 		// High priority infoI shadows low priority infoJ
-		if shadowType := ruleShadowsRule(infoI, infoJ); shadowType != "" {
+		if shadowType := ruleA_Shadows_ruleB(infoI.NormalizedConstraints, infoJ.NormalizedConstraints); shadowType != "" {
 			warnings = append(warnings, ConflictWarning{
 				Severity:         "Warning",
 				Type:             shadowType,
@@ -805,8 +723,8 @@ func checkPairConflict(infoI, infoJ ruleMatchInfo) []ConflictWarning {
 		}
 	} else if infoI.Priority == infoJ.Priority {
 		// Same priority: they can only shadow if they belong to the same host routing bucket (i.e. identical host patterns)
-		if hasEquivalentHost(infoI.Conditions, infoJ.Conditions) {
-			if shadowTypeIJ := ruleShadowsRule(infoI, infoJ); shadowTypeIJ != "" {
+		if hasEquivalentHost(infoI.NormalizedConstraints, infoJ.NormalizedConstraints) {
+			if shadowTypeIJ := ruleA_Shadows_ruleB(infoI.NormalizedConstraints, infoJ.NormalizedConstraints); shadowTypeIJ != "" {
 				warnings = append(warnings, ConflictWarning{
 					Severity:         "Warning",
 					Type:             shadowTypeIJ,
@@ -815,7 +733,7 @@ func checkPairConflict(infoI, infoJ ruleMatchInfo) []ConflictWarning {
 					Message:          buildShadowingMessage(infoI, infoJ, shadowTypeIJ, true),
 				})
 			}
-			if shadowTypeJI := ruleShadowsRule(infoJ, infoI); shadowTypeJI != "" {
+			if shadowTypeJI := ruleA_Shadows_ruleB(infoJ.NormalizedConstraints, infoI.NormalizedConstraints); shadowTypeJI != "" {
 				warnings = append(warnings, ConflictWarning{
 					Severity:         "Warning",
 					Type:             shadowTypeJI,
