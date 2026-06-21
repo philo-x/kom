@@ -54,7 +54,7 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 
 	// Step 1: Try Exec nc / curl / wget inside the source Pod first
 	execCommand := fmt.Sprintf("nc -z -w %d %s %d", timeout, target, port)
-	var execResult string
+	var execResult []byte
 	err = kubectl.Namespace(meta.Namespace).
 		Name(meta.Name).
 		Ctl().Pod().
@@ -63,11 +63,11 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 		Execute(&execResult).Error
 
 	if err == nil {
-		return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'nc'):\n%s", execResult), meta)
+		return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'nc'):\n%s", string(execResult)), meta)
 	}
 
 	// If it fails because nc is not found, try curl or wget
-	if strings.Contains(err.Error(), "executable file not found") || strings.Contains(execResult, "not found") {
+	if strings.Contains(err.Error(), "executable file not found") || strings.Contains(string(execResult), "not found") {
 		execCommand = fmt.Sprintf("curl -I -s --connect-timeout %d http://%s:%d", timeout, target, port)
 		err = kubectl.Namespace(meta.Namespace).
 			Name(meta.Name).
@@ -76,7 +76,7 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 			Command("sh", "-c", execCommand).
 			Execute(&execResult).Error
 		if err == nil {
-			return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'curl'):\n%s", execResult), meta)
+			return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'curl'):\n%s", string(execResult)), meta)
 		}
 
 		execCommand = fmt.Sprintf("wget -qO- --timeout=%d http://%s:%d", timeout, target, port)
@@ -87,7 +87,7 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 			Command("sh", "-c", execCommand).
 			Execute(&execResult).Error
 		if err == nil {
-			return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'wget'):\n%s", execResult), meta)
+			return tools.TextResult(fmt.Sprintf("Connection successful (verified via internal exec 'wget'):\n%s", string(execResult)), meta)
 		}
 	}
 
@@ -101,10 +101,10 @@ func DiagnosePodNetworkHandler(ctx context.Context, request mcp.CallToolRequest)
 		strings.Contains(errStr, "operation denied") ||
 		strings.Contains(errStr, "forbidden") ||
 		strings.Contains(errStr, "unauthorized") ||
-		strings.Contains(execResult, "not found")
+		strings.Contains(string(execResult), "not found")
 
 	if !isExecUnavailable {
-		return tools.TextResult(fmt.Sprintf("Connection failed inside pod (Command failed):\nError: %v\nOutput: %s", err, execResult), meta)
+		return tools.TextResult(fmt.Sprintf("Connection failed inside pod (Command failed):\nError: %v\nOutput: %s", err, string(execResult)), meta)
 	}
 
 	klog.V(2).Infof("Pod %s is missing networking utilities (nc/curl/wget) or exec is disabled/forbidden. Spawning a temporary debug Pod...", meta.Name)

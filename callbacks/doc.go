@@ -2,7 +2,6 @@ package callbacks
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/weibaohui/kom/kom"
 	"github.com/weibaohui/kom/kom/doc"
@@ -21,12 +20,12 @@ func Doc(k *kom.Kubectl) error {
 		return fmt.Errorf("请调用GVK()方法设置GroupVersionKind")
 	}
 
-	// 反射检查
-	destValue := reflect.ValueOf(stmt.Dest)
-
-	// 确保 dest 是一个指向字节切片的指针
-	if !(destValue.Kind() == reflect.Ptr && destValue.Elem().Kind() == reflect.Slice) || destValue.Elem().Type().Elem().Kind() != reflect.Uint8 {
-		return fmt.Errorf("请确保dest 是一个指向字节切片的指针。定义var s []byte 使用&s")
+	// 检查 dest 类型
+	switch stmt.Dest.(type) {
+	case *string, *[]byte:
+		// valid
+	default:
+		return fmt.Errorf("请确保 dest 是一个指向 string 或 []byte 的指针")
 	}
 
 	cacheKey := fmt.Sprintf("%s/%s/%s/%s", gvk.Group, gvk.Version, gvk.Kind, field)
@@ -47,11 +46,15 @@ func Doc(k *kom.Kubectl) error {
 	}
 
 	// 将结果写入 tx.Statement.Dest
-	if destBytes, ok := k.Statement.Dest.(*[]byte); ok {
-		*destBytes = []byte(result)
-		klog.V(8).Infof("Doc result %s", *destBytes)
-	} else {
-		return fmt.Errorf("dest is not a *[]byte")
+	switch dest := k.Statement.Dest.(type) {
+	case *string:
+		*dest = result
+		klog.V(8).Infof("Doc result %s", *dest)
+	case *[]byte:
+		*dest = []byte(result)
+		klog.V(8).Infof("Doc result %s", *dest)
+	default:
+		return fmt.Errorf("dest is neither *string nor *[]byte")
 	}
 	return nil
 }

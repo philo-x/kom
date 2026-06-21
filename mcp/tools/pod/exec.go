@@ -47,7 +47,7 @@ func ExecHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToo
 	klog.V(6).Infof("Executing command in pod %s/%s container %s: %v %v", meta.Namespace, meta.Name, containerName, command, argsVal)
 
 	// 执行命令
-	var execResult string
+	var execResult []byte
 	err = kom.Cluster(meta.Cluster).WithContext(ctx).
 		Namespace(meta.Namespace).
 		Name(meta.Name).
@@ -60,5 +60,5 @@ func ExecHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToo
 		return nil, fmt.Errorf("command execution failed: %v", err)
 	}
 
-	return tools.TextResult(execResult, meta)
+	return tools.TextResult(string(execResult), meta)
 }

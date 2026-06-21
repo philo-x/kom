@@ -244,7 +244,7 @@ func (k *Kubectl) Patch(dest interface{}, pt types.PatchType, data string) *Kube
 	return tx
 }
 
-// Execute 请确保dest 是一个指向字节切片的指针。定义var s []byte 使用&s
+// Execute 请确保dest 是一个指向 string 或 []byte 的指针
 // Deprecated: use Ctl().Pod().Command().Execute() instead.
 func (k *Kubectl) Execute(dest interface{}) *Kubectl {
 	tx := k.getInstance()

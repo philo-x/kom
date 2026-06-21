@@ -42,7 +42,7 @@ func TestPodDNSResolveHandler(ctx context.Context, request mcp.CallToolRequest) 
 	kubectl := kom.Cluster(meta.Cluster).WithContext(ctx)
 
 	// Step 1: Run nslookup inside the pod
-	var resolveOutput string
+	var resolveOutput []byte
 	err = kubectl.Namespace(meta.Namespace).
 		Name(meta.Name).
 		Ctl().Pod().
@@ -52,15 +52,15 @@ func TestPodDNSResolveHandler(ctx context.Context, request mcp.CallToolRequest) 
 
 	var sb strings.Builder
 	if err == nil {
-		sb.WriteString(fmt.Sprintf("DNS resolution successful inside pod:\n%s\n", resolveOutput))
+		sb.WriteString(fmt.Sprintf("DNS resolution successful inside pod:\n%s\n", string(resolveOutput)))
 		return tools.TextResult(sb.String(), meta)
 	}
 
-	sb.WriteString(fmt.Sprintf("nslookup failed with error: %v\nOutput: %s\n", err, resolveOutput))
+	sb.WriteString(fmt.Sprintf("nslookup failed with error: %v\nOutput: %s\n", err, string(resolveOutput)))
 
 	// Try dig if nslookup is not found
-	if strings.Contains(err.Error(), "executable file not found") || strings.Contains(resolveOutput, "not found") {
-		var digOutput string
+	if strings.Contains(err.Error(), "executable file not found") || strings.Contains(string(resolveOutput), "not found") {
+		var digOutput []byte
 		err = kubectl.Namespace(meta.Namespace).
 			Name(meta.Name).
 			Ctl().Pod().
@@ -68,13 +68,13 @@ func TestPodDNSResolveHandler(ctx context.Context, request mcp.CallToolRequest) 
 			Command("sh", "-c", "dig "+domain).
 			Execute(&digOutput).Error
 		if err == nil {
-			sb.WriteString(fmt.Sprintf("DNS resolution successful (via dig):\n%s\n", digOutput))
+			sb.WriteString(fmt.Sprintf("DNS resolution successful (via dig):\n%s\n", string(digOutput)))
 			return tools.TextResult(sb.String(), meta)
 		}
 	}
 
 	// Step 2: Grab /etc/resolv.conf to inspect DNS configs
-	var resolvConf string
+	var resolvConf []byte
 	err = kubectl.Namespace(meta.Namespace).
 		Name(meta.Name).
 		Ctl().Pod().
@@ -82,7 +82,7 @@ func TestPodDNSResolveHandler(ctx context.Context, request mcp.CallToolRequest) 
 		Command("cat", "/etc/resolv.conf").
 		Execute(&resolvConf).Error
 	if err == nil {
-		sb.WriteString(fmt.Sprintf("\n--- Pod /etc/resolv.conf Configuration ---\n%s\n", resolvConf))
+		sb.WriteString(fmt.Sprintf("\n--- Pod /etc/resolv.conf Configuration ---\n%s\n", string(resolvConf)))
 	} else {
 		sb.WriteString(fmt.Sprintf("\nFailed to read /etc/resolv.conf: %v\n", err))
 	}

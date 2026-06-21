@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
-	"reflect"
 	"strings"
 
 	"github.com/weibaohui/kom/kom"
@@ -32,12 +31,12 @@ func ExecuteCommand(k *kom.Kubectl) error {
 		return fmt.Errorf("请调用Command()方法设置命令")
 	}
 
-	// 反射检查
-	destValue := reflect.ValueOf(stmt.Dest)
-
-	// 确保 dest 是一个指向字节切片的指针
-	if !(destValue.Kind() == reflect.Ptr && destValue.Elem().Kind() == reflect.Slice) || destValue.Elem().Type().Elem().Kind() != reflect.Uint8 {
-		return fmt.Errorf("请确保dest 是一个指向字节切片的指针。定义var s []byte 使用&s")
+	// 检查 dest 类型
+	switch stmt.Dest.(type) {
+	case *string, *[]byte:
+		// valid
+	default:
+		return fmt.Errorf("请确保 dest 是一个指向 string 或 []byte 的指针")
 	}
 
 	var err error
@@ -90,12 +89,15 @@ func ExecuteCommand(k *kom.Kubectl) error {
 	}
 
 	// 将结果写入 tx.Statement.Dest
-	if destBytes, ok := k.Statement.Dest.(*[]byte); ok {
-		// 直接使用 outBuf.Bytes() 赋值
-		*destBytes = outBuf.Bytes()
-		klog.V(8).Infof("Execute result %s", *destBytes)
-	} else {
-		return fmt.Errorf("dest is not a *[]byte")
+	switch dest := k.Statement.Dest.(type) {
+	case *string:
+		*dest = outBuf.String()
+		klog.V(8).Infof("Execute result %s", *dest)
+	case *[]byte:
+		*dest = outBuf.Bytes()
+		klog.V(8).Infof("Execute result %s", *dest)
+	default:
+		return fmt.Errorf("dest is neither *string nor *[]byte")
 	}
 	return nil
 }
